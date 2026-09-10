@@ -1,0 +1,21 @@
+# Local development infra. Production uses the same image in the cloud.
+# pgvector/pgvector ships PostgreSQL 16 with the vector extension preinstalled.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: newsroom
+      POSTGRES_PASSWORD: newsroom
+      POSTGRES_DB: newsroom
+    ports:
+      - "5432:5432"
+    volumes:
+      - newsroom_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newsroom -d newsroom"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  newsroom_pgdata:

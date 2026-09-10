@@ -1,0 +1,103 @@
+"""Long-running collect-only service (stage 1a).
+
+Two concurrent duties, nothing published:
+  * RSS: poll each source on its own `poll_interval` (due-based scheduler).
+  * Telegram: realtime + backfill via TelegramCollector (only if the flag is on).
+
+The scheduling *decisions* (`due_source_ids`, `collect_due_rss`) are sync and
+pg-tested; the async loops are thin wiring (`# pragma: no cover`).
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+from typing import Callable
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from newsroom.collectors.rss import CollectResult, RssCollector
+from newsroom.models import Source
+
+log = logging.getLogger("newsroom.service")
+
+
+def _utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def due_source_ids(session: Session, now: dt.datetime | None = None) -> list[int]:
+    """Active RSS sources whose poll_interval has elapsed since the last success
+    (never-collected and previously-failing sources are always due)."""
+    now = now or _utc_now()
+    sources = session.scalars(
+        select(Source).where(Source.kind == "rss", Source.active.is_(True))
+    ).all()
+    due: list[int] = []
+    for s in sources:
+        if s.last_success_at is None:
+            due.append(s.id)
+            continue
+        if (now - s.last_success_at).total_seconds() >= (s.poll_interval or 300):
+            due.append(s.id)
+    return due
+
+
+def collect_due_rss(session_factory, now: dt.datetime | None = None,
+                    fetch: Callable[[str], bytes] | None = None) -> list[CollectResult]:
+    """One scheduler tick: collect only the RSS sources that are due right now."""
+    with session_factory() as s:
+        ids = due_source_ids(s, now)
+    collector = RssCollector(session_factory, fetch=fetch)
+    return [collector.collect_source(sid) for sid in ids]
+
+
+async def poll_rss_forever(session_factory, *, tick_seconds: float = 30.0,
+                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Run the RSS scheduler until `stop` is set. Blocking collection runs in a
+    worker thread so the event loop stays free for the Telegram realtime stream."""
+    while not (stop and stop.is_set()):
+        try:
+            results = await asyncio.to_thread(collect_due_rss, session_factory)
+            if results:
+                log.info("rss tick", extra={"collected": len(results),
+                                            "created": sum(r.created for r in results)})
+        except Exception:
+            log.exception("rss tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+async def run_service() -> None:  # pragma: no cover — process entrypoint
+    """`python -m newsroom.service` — the collect-only daemon."""
+    from dotenv import load_dotenv
+
+    from newsroom.collectors.telegram import TelegramCollector, telegram_enabled
+    from newsroom.config.sources import load_sources
+    from newsroom.db import init_db, make_engine, make_session_factory
+    from newsroom.logging import setup_logging
+    from newsroom.runner import CONFIG_PATH
+    from newsroom.sources.registry import sync_sources
+
+    load_dotenv()
+    setup_logging()
+    engine = make_engine()
+    init_db(engine)
+    session_factory = make_session_factory(engine)
+
+    with session_factory() as s:
+        sync_sources(s, load_sources(CONFIG_PATH))
+        s.commit()
+
+    tasks = [asyncio.create_task(poll_rss_forever(session_factory))]
+    if telegram_enabled():
+        tasks.append(asyncio.create_task(TelegramCollector(session_factory).start()))
+        log.info("telegram collection enabled")
+    else:
+        log.info("telegram collection disabled (COLLECTOR_TELEGRAM_ENABLED off)")
+
+    await asyncio.gather(*tasks)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    asyncio.run(run_service())

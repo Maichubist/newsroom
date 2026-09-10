@@ -1,0 +1,56 @@
+# Джерела для збирачів. Версіонований конфіг (architecture §6).
+#
+# tier: official | media | aggregator | leak | anonymous
+#   official  — прямі державні/офіційні джерела (Генштаб, ОВА, міністерства). Поки немає.
+#   media     — усталені редакції та новинні агенції.
+#   aggregator, leak, anonymous — поки не використовуємо.
+#
+# ПОТРІБНЕ ТВОЄ РІШЕННЯ (Андрію): нижче для всіх виставлено tier: media як
+# стартова точка. Кандидати на перекласифікацію:
+#   - Укрінформ (державна агенція) і Суспільне (суспільний мовник) — можливо official/is_official.
+#   - Додати офіційні держджерела (tier: official) для тем критичного ризику (хартія 3.1).
+#
+# Офіційні держджерела для критичних тем (хартія 3.1) майже не мають робочого RSS
+# (перевірено: President 403, КМУ/НБУ/ДСНС/МЗС 404/порожньо). Вони Telegram-first,
+# тож підуть як kind: telegram, коли ввімкнемо Telethon-збирач (M6):
+#   Генштаб ЗСУ, Повітряні Сили, Офіс Президента, Кабмін, ДСНС, обласні ВА/ОВА.
+# Робочі офіційні RSS уже додані вище: Укрінформ, Суспільне, КМДА.
+#
+# Приклад форми Telegram-джерела (collector flag off у 1а):
+#   - name: "Генштаб ЗСУ"
+#     kind: telegram
+#     handle_or_url: "@generalstaff_ua"
+#     origin: ua
+#     tier: official
+#     is_official: true
+#     active: false
+
+sources:
+  # ---------------- Українські ----------------
+  - {name: "Українська Правда", kind: rss, handle_or_url: "https://www.pravda.com.ua/rss/", origin: ua, lang: uk, tier: media}
+  - {name: "Економічна Правда", kind: rss, handle_or_url: "https://www.epravda.com.ua/rss/", origin: ua, lang: uk, tier: media}
+  - {name: "Суспільне", kind: rss, handle_or_url: "https://suspilne.media/rss/all.rss", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "НВ", kind: rss, handle_or_url: "https://nv.ua/ukr/rss/all.xml", origin: ua, lang: uk, tier: media}
+  - {name: "Ліга.Новини", kind: rss, handle_or_url: "https://www.liga.net/news/all/rss.xml", origin: ua, lang: uk, tier: media}
+  - {name: "Укрінформ", kind: rss, handle_or_url: "https://www.ukrinform.ua/rss/block-lastnews", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "КМДА (Київ)", kind: rss, handle_or_url: "https://kyivcity.gov.ua/rss/", origin: ua, lang: uk, region: Kyiv, tier: official, is_official: true}
+  - {name: "Мілітарний", kind: rss, handle_or_url: "https://mil.in.ua/uk/feed/", origin: ua, lang: uk, tier: media}
+  - {name: "Цензор.НЕТ", kind: rss, handle_or_url: "https://assets.censor.net/rss/censor.net/rss_uk_news.xml", origin: ua, lang: uk, tier: media}
+  - {name: "LB.ua", kind: rss, handle_or_url: "https://lb.ua/rss", origin: ua, lang: uk, tier: media}
+  - {name: "Бабель", kind: rss, handle_or_url: "https://babel.ua/rss", origin: ua, lang: uk, tier: media}
+  - {name: "ZN.UA", kind: rss, handle_or_url: "https://zn.ua/ukr/rss", origin: ua, lang: uk, tier: media}
+
+  # ---------------- Світові ----------------
+  - {name: "BBC World", kind: rss, handle_or_url: "https://feeds.bbci.co.uk/news/world/rss.xml", origin: world, lang: en, tier: media}
+  - {name: "The Guardian World", kind: rss, handle_or_url: "https://www.theguardian.com/world/rss", origin: world, lang: en, tier: media}
+  - {name: "Al Jazeera", kind: rss, handle_or_url: "https://www.aljazeera.com/xml/rss/all.xml", origin: world, lang: en, tier: media}
+  - {name: "DW", kind: rss, handle_or_url: "https://rss.dw.com/rdf/rss-en-all", origin: world, lang: en, tier: media}
+  - {name: "Politico EU", kind: rss, handle_or_url: "https://www.politico.eu/feed/", origin: world, lang: en, tier: media}
+  - {name: "CNBC", kind: rss, handle_or_url: "https://www.cnbc.com/id/100003114/device/rss/rss.html", origin: world, lang: en, tier: media}
+  - {name: "Bloomberg Markets", kind: rss, handle_or_url: "https://feeds.bloomberg.com/markets/news.rss", origin: world, lang: en, tier: media}
+  - {name: "TechCrunch", kind: rss, handle_or_url: "https://techcrunch.com/feed/", origin: world, lang: en, tier: media}
+  - {name: "Ars Technica", kind: rss, handle_or_url: "https://feeds.arstechnica.com/arstechnica/index", origin: world, lang: en, tier: media}
+  - {name: "The Verge", kind: rss, handle_or_url: "https://www.theverge.com/rss/index.xml", origin: world, lang: en, tier: media}
+  - {name: "MIT Technology Review", kind: rss, handle_or_url: "https://www.technologyreview.com/feed/", origin: world, lang: en, tier: media}
+  - {name: "VentureBeat AI", kind: rss, handle_or_url: "https://venturebeat.com/category/ai/feed/", origin: world, lang: en, tier: media}
+  - {name: "Defense News", kind: rss, handle_or_url: "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", origin: world, lang: en, tier: media}
