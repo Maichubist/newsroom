@@ -35,7 +35,7 @@ def main() -> None:  # pragma: no cover — thin wiring, exercised via collect_a
 
     from newsroom.config.sources import load_sources
     from newsroom.db import init_db, make_engine, make_session_factory
-    from newsroom.logging import setup_logging
+    from newsroom.logsetup import setup_logging
     from newsroom.sources.registry import health_report, sync_sources
 
     load_dotenv()

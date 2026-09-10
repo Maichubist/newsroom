@@ -1,4 +1,10 @@
-"""Structured JSON logging (architecture §11: logs carry item/event ids)."""
+"""Structured JSON logging (architecture §11: logs carry item/event ids).
+
+Named `logsetup` rather than `logging` on purpose: a module called `logging.py`
+inside the package shadows the standard library's `logging` whenever the package
+directory lands on sys.path[0] (e.g. running a file directly), which breaks every
+`import logging` in the codebase.
+"""
 from __future__ import annotations
 
 import json

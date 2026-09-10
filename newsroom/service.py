@@ -75,7 +75,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     from newsroom.collectors.telegram import TelegramCollector, telegram_enabled
     from newsroom.config.sources import load_sources
     from newsroom.db import init_db, make_engine, make_session_factory
-    from newsroom.logging import setup_logging
+    from newsroom.logsetup import setup_logging
     from newsroom.runner import CONFIG_PATH
     from newsroom.sources.registry import sync_sources
 
