@@ -14,13 +14,25 @@ import sys
 from datetime import datetime, timezone
 
 
+# Attribute names the stdlib puts on every LogRecord. Passing any of these as an
+# `extra` key raises KeyError("Attempt to overwrite ..."), so `bind()` guards them.
+RESERVED_LOGRECORD_KEYS = set(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()
+) | {"message", "asctime", "taskName"}
+
+
+def bind(**fields) -> dict:
+    """Build a safe `extra` dict for logging. Keys that collide with reserved
+    LogRecord attributes (created, name, msg, module, …) are suffixed with '_'
+    so structured logging never crashes on a natural field name."""
+    return {(k + "_" if k in RESERVED_LOGRECORD_KEYS else k): v for k, v in fields.items()}
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line. Extra fields (item_id, event_id, source_id, …)
     passed via ``logger.info(msg, extra={...})`` are merged into the record."""
 
-    _RESERVED = set(
-        logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()
-    ) | {"message", "asctime", "taskName"}
+    _RESERVED = RESERVED_LOGRECORD_KEYS
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {

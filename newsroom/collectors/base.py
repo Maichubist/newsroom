@@ -46,6 +46,11 @@ def compute_simhash(title: str | None, text: str | None) -> int:
     for i in range(64):
         if bit_counts[i] > 0:
             out |= 1 << i
+    # Map the unsigned 64-bit pattern into signed range so it fits a SQL BIGINT
+    # (Postgres has no unsigned bigint). The bit pattern is preserved, so
+    # hamming_distance (which masks to 64 bits) is unaffected.
+    if out >= (1 << 63):
+        out -= 1 << 64
     return out
 
 

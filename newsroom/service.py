@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from newsroom.collectors.rss import CollectResult, RssCollector
+from newsroom.logsetup import bind
 from newsroom.models import Source
 
 log = logging.getLogger("newsroom.service")
@@ -61,8 +62,8 @@ async def poll_rss_forever(session_factory, *, tick_seconds: float = 30.0,
         try:
             results = await asyncio.to_thread(collect_due_rss, session_factory)
             if results:
-                log.info("rss tick", extra={"collected": len(results),
-                                            "created": sum(r.created for r in results)})
+                log.info("rss tick", extra=bind(collected=len(results),
+                                                created=sum(r.created for r in results)))
         except Exception:
             log.exception("rss tick failed")
         await asyncio.sleep(tick_seconds)

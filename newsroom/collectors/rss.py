@@ -14,6 +14,7 @@ from typing import Callable
 import feedparser
 
 from newsroom.collectors.base import RawItem, RawMedia
+from newsroom.logsetup import bind
 
 # NB: DB-touching imports (ingest, models) are done lazily inside RssCollector
 # so that `parse_feed` stays importable with only stdlib + feedparser (pure,
@@ -187,6 +188,6 @@ class RssCollector:
                 s.commit()
                 log.exception("rss persist failed", extra={"source_id": source_id})
                 return CollectResult(source_id, ok=False, total=len(items), error=str(exc))
-        log.info("rss collected", extra={"source_id": source_id, "total": len(items),
-                                         "created": created, "updated": updated})
+        log.info("rss collected", extra=bind(source_id=source_id, total=len(items),
+                                             created=created, updated=updated))
         return CollectResult(source_id, ok=True, total=len(items), created=created, updated=updated)

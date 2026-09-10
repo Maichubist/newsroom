@@ -13,6 +13,7 @@ from typing import Callable
 from sqlalchemy import select
 
 from newsroom.collectors.rss import CollectResult, RssCollector
+from newsroom.logsetup import bind
 from newsroom.models import Source
 
 log = logging.getLogger("newsroom.runner")
@@ -48,20 +49,20 @@ def main() -> None:  # pragma: no cover — thin wiring, exercised via collect_a
     with session_factory() as s:
         synced = sync_sources(s, configs)
         s.commit()
-    log.info("sources synced", extra=synced)
+    log.info("sources synced", extra=bind(**synced))
 
     results = collect_all_rss(session_factory)
-    log.info("collect pass done", extra={
-        "sources": len(results),
-        "created": sum(r.created for r in results),
-        "updated": sum(r.updated for r in results),
-        "failed": sum(not r.ok for r in results),
-    })
+    log.info("collect pass done", extra=bind(
+        sources=len(results),
+        created=sum(r.created for r in results),
+        updated=sum(r.updated for r in results),
+        failed=sum(not r.ok for r in results),
+    ))
 
     with session_factory() as s:
         for row in health_report(s):
             if not row["healthy"]:
-                log.warning("source unhealthy", extra=row)
+                log.warning("source unhealthy", extra=bind(**row))
 
 
 if __name__ == "__main__":  # pragma: no cover

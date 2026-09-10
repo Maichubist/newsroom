@@ -41,3 +41,20 @@ def test_simhash_near_duplicate_is_closer_than_unrelated():
 
 def test_simhash_empty_is_zero():
     assert compute_simhash(None, None) == 0
+
+
+def test_simhash_always_fits_signed_bigint():
+    # Regression: an unsigned 64-bit simhash overflows Postgres BIGINT. Values
+    # must stay within the signed range, and the high-bit case must be exercised.
+    lo, hi = -(2 ** 63), 2 ** 63 - 1
+    saw_negative = False
+    for i in range(50):
+        h = compute_simhash(f"Заголовок {i}", f"Текст новини номер {i} про подію {i * 7}")
+        assert lo <= h <= hi
+        saw_negative = saw_negative or h < 0
+    assert saw_negative
+
+
+def test_hamming_handles_signed_values():
+    assert hamming_distance(-1, 0) == 64   # all 64 bits differ
+    assert hamming_distance(-1, -1) == 0
