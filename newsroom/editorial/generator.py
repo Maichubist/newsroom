@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from newsroom.editorial.draft import DraftContent, parse_draft
+from newsroom.promptutil import fill_prompt
 
 log = logging.getLogger("newsroom.editorial.generator")
 
@@ -57,8 +58,8 @@ DEFAULT_PROMPT = """Ти — редактор українського нови�
 написати живий, конкретний пост СУВОРО за наданими фактами.
 
 Пиши природною розмовною українською, як пише жива людина, а не машина. Поверни лише JSON:
-{{"headline": "...", "lead": "...", "why_important": "...", "what_it_means": "...",
-"watching": "...", "rubrics": ["..."]}}
+{"headline": "...", "lead": "...", "why_important": "...", "what_it_means": "...",
+"watching": "...", "rubrics": ["..."]}
 
 ЖОРСТКІ ПРАВИЛА:
 1. КОНКРЕТИКА. Кожне речення має нести факт із матеріалу — хто, що, де, коли, цифри,
@@ -98,7 +99,7 @@ class LLMGenerator:  # pragma: no cover - network
         try:
             resp = self._ensure_client().chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": self.prompt.format(feedback=fb, material=material)}],
+                messages=[{"role": "user", "content": fill_prompt(self.prompt, feedback=fb, material=material)}],
                 response_format={"type": "json_object"},
                 temperature=0.4,
             )

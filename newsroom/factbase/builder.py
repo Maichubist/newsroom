@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from newsroom.analyze.clustering import best_match, update_centroid
+from newsroom.promptutil import fill_prompt
 
 log = logging.getLogger("newsroom.factbase")
 
@@ -206,7 +207,7 @@ class LLMFactExtractor:  # pragma: no cover - network
         try:
             resp = self._ensure_client().chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": self.prompt.format(news_text=news_text)}],
+                messages=[{"role": "user", "content": fill_prompt(self.prompt, news_text=news_text)}],
                 response_format={"type": "json_object"},
                 temperature=0,
             )

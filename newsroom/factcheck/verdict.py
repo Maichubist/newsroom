@@ -17,6 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from newsroom.promptutil import fill_prompt
+
 log = logging.getLogger("newsroom.factcheck.verdict")
 
 # claim-level verdict vocabulary (stored in claims.verdict)
@@ -127,7 +129,7 @@ class LLMVerdictJudge:  # pragma: no cover - network
 
     def _call(self, claim_text: str, evidence_snippets: list[str]) -> str | None:
         evidence_block = "\n".join(f"[{i}] {snip}" for i, snip in enumerate(evidence_snippets)) or "(немає)"
-        content = self.prompt.format(claim=claim_text, evidence=evidence_block)
+        content = fill_prompt(self.prompt, claim=claim_text, evidence=evidence_block)
         try:
             resp = self._ensure_client().chat.completions.create(
                 model=self.model,

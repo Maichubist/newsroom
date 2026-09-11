@@ -18,6 +18,8 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+from newsroom.promptutil import fill_prompt
+
 log = logging.getLogger("newsroom.editorial.updates")
 
 # update_type vocabulary (stored in events.update_type) — architecture §5.2, §7
@@ -150,7 +152,8 @@ class LLMUpdateClassifier:  # pragma: no cover - network
 
     def _call(self, current_summary: str | None, event_title: str | None, fact_base: dict | None) -> str | None:
         event_view = "\n".join(filter(None, [event_title or "", _render_fact_base(fact_base)])).strip()
-        content = self.prompt.format(summary=(current_summary or "(немає)"), event=event_view or "(без опису)")
+        content = fill_prompt(self.prompt, summary=(current_summary or "(немає)"),
+                              event=event_view or "(без опису)")
         try:
             resp = self._ensure_client().chat.completions.create(
                 model=self.model,

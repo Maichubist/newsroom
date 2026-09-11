@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+from newsroom.promptutil import fill_prompt
+
 log = logging.getLogger("newsroom.factcheck.claims")
 
 # who | what | where | when | number | quote | cause — free-form, lowercased.
@@ -84,7 +86,7 @@ class LLMClaimExtractor:  # pragma: no cover - network
         try:
             resp = self._ensure_client().chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": self.prompt.format(news_text=news_text)}],
+                messages=[{"role": "user", "content": fill_prompt(self.prompt, news_text=news_text)}],
                 response_format={"type": "json_object"},
                 temperature=0,
             )
