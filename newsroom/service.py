@@ -32,6 +32,10 @@ def verify_enabled() -> bool:
     return os.getenv("VERIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def factcheck_enabled() -> bool:
+    return os.getenv("FACTCHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -115,6 +119,35 @@ async def verify_forever(session_factory, verifier, *, tick_seconds: float = 20.
         await asyncio.sleep(tick_seconds)
 
 
+def build_factchecker_from_env(session_factory):  # pragma: no cover — needs OpenAI
+    """Assemble the fact-checker (LLM claim extractor + corpus evidence + LLM verdict)."""
+    from newsroom.analyze.embeddings import OpenAIEmbedder
+    from newsroom.factcheck import CorpusEvidenceSearcher, FactChecker, LLMClaimExtractor, LLMVerdictJudge
+
+    return FactChecker(
+        session_factory,
+        extractor=LLMClaimExtractor(),
+        searcher=CorpusEvidenceSearcher(session_factory, OpenAIEmbedder()),
+        judge=LLMVerdictJudge(),
+    )
+
+
+async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 30.0,
+                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Fact-check publishable events (claims -> evidence -> verdict) until stopped.
+    Runs before editorial so drafts can build on verified claims. Nothing published."""
+    from newsroom.factcheck import check_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(check_pending, session_factory, checker)
+            if stats.get("events"):
+                log.info("factcheck tick", extra=bind(**stats))
+        except Exception:
+            log.exception("factcheck tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — needs OpenAI
     """Assemble the editorial pipeline (LLM generator + charter configs)."""
     from newsroom.analyze.ai_accent import load_ai_accent
@@ -178,6 +211,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("verification enabled")
     else:
         log.info("verification disabled (VERIFY_ENABLED off)")
+
+    if factcheck_enabled():
+        checker = build_factchecker_from_env(session_factory)
+        tasks.append(asyncio.create_task(factcheck_forever(session_factory, checker)))
+        log.info("fact-checking enabled")
+    else:
+        log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
 
     if editorial_enabled():
         pipeline = build_editorial_pipeline_from_env(session_factory)
