@@ -34,6 +34,12 @@ from newsroom.analyze.clustering import (
     cosine,
     update_centroid,
 )
+from newsroom.analyze.verify import (
+    Classification,
+    Classifier,
+    VerifyResult,
+    Verifier,
+)
 
 __all__ = [
     "SourceItem", "group_materials", "independent_source_count",
@@ -43,4 +49,5 @@ __all__ = [
     "StopRule", "Violation", "StopListConfigError", "load_stoplist", "check",
     "is_blocked", "worst_action",
     "EventClusterer", "AssignResult", "cosine", "update_centroid", "best_match",
+    "Verifier", "Classifier", "Classification", "VerifyResult",
 ]
