@@ -6,11 +6,21 @@ from newsroom.factcheck.claims import (
     store_claims,
 )
 from newsroom.factcheck.evidence import (
+    CompositeEvidenceSearcher,
     CorpusEvidenceSearcher,
     EvidenceRef,
     EvidenceSearcher,
+    OfficialRegistrySearcher,
     select_corpus_evidence,
     store_evidence,
+)
+from newsroom.factcheck.external import (
+    ExternalHit,
+    FactCheckDB,
+    FactCheckDBSearcher,
+    RefutationClient,
+    hits_to_evidence,
+    load_factcheck_sources,
 )
 from newsroom.factcheck.verdict import (
     LLMVerdictJudge,
@@ -30,8 +40,11 @@ __all__ = [
     # claims (§9 step 1)
     "ClaimDraft", "ClaimExtractor", "LLMClaimExtractor", "parse_claims", "store_claims",
     # evidence (§9 step 2)
-    "EvidenceRef", "EvidenceSearcher", "CorpusEvidenceSearcher",
-    "select_corpus_evidence", "store_evidence",
+    "EvidenceRef", "EvidenceSearcher", "CorpusEvidenceSearcher", "OfficialRegistrySearcher",
+    "CompositeEvidenceSearcher", "select_corpus_evidence", "store_evidence",
+    # external refutation DBs (§9 step 2)
+    "FactCheckDB", "load_factcheck_sources", "ExternalHit", "RefutationClient",
+    "FactCheckDBSearcher", "hits_to_evidence",
     # verdict (§9 step 6)
     "VerdictResult", "VerdictJudge", "LLMVerdictJudge", "parse_verdict", "apply_verdict",
     # orchestration

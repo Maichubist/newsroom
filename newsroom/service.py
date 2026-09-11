@@ -148,14 +148,28 @@ async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30
 
 
 def build_factchecker_from_env(session_factory):  # pragma: no cover — needs OpenAI
-    """Assemble the fact-checker (LLM claim extractor + corpus evidence + LLM verdict)."""
+    """Assemble the fact-checker: LLM claim extractor + composite evidence
+    (own corpus + official registry) + LLM verdict. Refutation-DB clients are
+    off until configured, so they are not wired in here yet."""
     from newsroom.analyze.embeddings import OpenAIEmbedder
-    from newsroom.factcheck import CorpusEvidenceSearcher, FactChecker, LLMClaimExtractor, LLMVerdictJudge
+    from newsroom.factcheck import (
+        CompositeEvidenceSearcher,
+        CorpusEvidenceSearcher,
+        FactChecker,
+        LLMClaimExtractor,
+        LLMVerdictJudge,
+        OfficialRegistrySearcher,
+    )
 
+    embedder = OpenAIEmbedder()
+    searcher = CompositeEvidenceSearcher([
+        CorpusEvidenceSearcher(session_factory, embedder),
+        OfficialRegistrySearcher(session_factory, embedder),
+    ])
     return FactChecker(
         session_factory,
         extractor=LLMClaimExtractor(),
-        searcher=CorpusEvidenceSearcher(session_factory, OpenAIEmbedder()),
+        searcher=searcher,
         judge=LLMVerdictJudge(),
     )
 

@@ -1,0 +1,32 @@
+# Реєстр баз спростувань для факт-чекінгу (architecture §9, крок 2). Версіоновано.
+#
+# Це зовнішні бази, куди FactCheckDBSearcher звертається через клієнт (HTTP —
+# поза офлайн-тестами). Кожен запис описує джерело; сам клієнт (пошук/парсинг)
+# підключається окремо і за замовчуванням вимкнений, доки не налаштований.
+version: "0.1"
+
+databases:
+  - key: stopfake
+    name: StopFake
+    homepage: "https://www.stopfake.org/uk/novini/"
+    lang: uk
+    kind: refutation
+    enabled: false
+  - key: voxcheck
+    name: VoxCheck
+    homepage: "https://voxukraine.org/voxcheck"
+    lang: uk
+    kind: refutation
+    enabled: false
+  - key: cpd
+    name: Центр протидії дезінформації (ЦПД)
+    homepage: "https://cpd.gov.ua/"
+    lang: uk
+    kind: refutation
+    enabled: false
+  - key: detector_media
+    name: Детектор медіа
+    homepage: "https://detector.media/"
+    lang: uk
+    kind: refutation
+    enabled: false
