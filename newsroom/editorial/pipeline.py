@@ -126,17 +126,26 @@ class EditorialPipeline:
 
 def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25) -> dict[str, int]:
     """One editorial tick: draft posts for publishable events that don't have a
-    publication yet. Once produced, the event has a publications row and is skipped
-    next tick. Nothing is published."""
-    from sqlalchemy import select
+    publication yet. Events the story-update step classified as summary-only
+    (confirmation / reaction / minor) are skipped — they only update the story
+    summary, not post (architecture §7). Unclassified events are still drafted.
+    Once produced, the event has a publications row and is skipped next tick.
+    Nothing is published."""
+    from sqlalchemy import or_, select
 
+    from newsroom.editorial.updates import SUMMARY_ONLY_UPDATE_TYPES
     from newsroom.models import Event, Publication
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         ids = list(s.execute(
             select(Event.id)
-            .where(Event.status.in_(("reported", "confirmed", "rumor")), Event.id.not_in(have_pub))
+            .where(
+                Event.status.in_(("reported", "confirmed", "rumor")),
+                Event.id.not_in(have_pub),
+                or_(Event.update_type.is_(None),
+                    Event.update_type.not_in(SUMMARY_ONLY_UPDATE_TYPES)),
+            )
             .order_by(Event.id)
             .limit(limit)
         ).scalars().all())

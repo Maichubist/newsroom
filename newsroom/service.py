@@ -40,6 +40,10 @@ def factcheck_enabled() -> bool:
     return os.getenv("FACTCHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def story_updates_enabled() -> bool:
+    return os.getenv("STORY_UPDATES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -190,6 +194,29 @@ async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 3
         await asyncio.sleep(tick_seconds)
 
 
+def build_story_updater_from_env(session_factory):  # pragma: no cover — needs OpenAI
+    """Assemble the story-update classifier (LLM)."""
+    from newsroom.editorial import LLMUpdateClassifier, StoryUpdater
+
+    return StoryUpdater(session_factory, classifier=LLMUpdateClassifier())
+
+
+async def story_updates_forever(session_factory, updater, *, tick_seconds: float = 30.0,
+                                stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Classify how each new event moves its story (update_type) and update the
+    running summary, before editorial drafts posts. Nothing is published."""
+    from newsroom.editorial import classify_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(classify_pending, session_factory, updater)
+            if stats.get("classified"):
+                log.info("story-update tick", extra=bind(**stats))
+        except Exception:
+            log.exception("story-update tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — needs OpenAI
     """Assemble the editorial pipeline (LLM generator + charter configs)."""
     from newsroom.analyze.ai_accent import load_ai_accent
@@ -267,6 +294,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("fact-checking enabled")
     else:
         log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
+
+    if story_updates_enabled():
+        updater = build_story_updater_from_env(session_factory)
+        tasks.append(asyncio.create_task(story_updates_forever(session_factory, updater)))
+        log.info("story updates enabled")
+    else:
+        log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
 
     if editorial_enabled():
         pipeline = build_editorial_pipeline_from_env(session_factory)

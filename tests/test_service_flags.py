@@ -6,6 +6,7 @@ from newsroom.service import (
     editorial_enabled,
     factbase_enabled,
     factcheck_enabled,
+    story_updates_enabled,
     verify_enabled,
 )
 
@@ -13,6 +14,7 @@ FLAGS = {
     "VERIFY_ENABLED": verify_enabled,
     "FACTBASE_ENABLED": factbase_enabled,
     "FACTCHECK_ENABLED": factcheck_enabled,
+    "STORY_UPDATES_ENABLED": story_updates_enabled,
     "EDITORIAL_ENABLED": editorial_enabled,
 }
 

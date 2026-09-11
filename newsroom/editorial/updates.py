@@ -39,6 +39,11 @@ ROUTE_SUMMARY = "summary_update"
 # only these warrant a standalone post (consequence only when significant)
 _ALWAYS_POST = frozenset({UPDATE_NEW_FACT, UPDATE_REFUTATION})
 
+# events classified as one of these never warrant a standalone post — they only
+# update the running summary. The editorial gate uses this coarse set (an
+# unclassified event, or new_fact / refutation / consequence, is still drafted).
+SUMMARY_ONLY_UPDATE_TYPES = frozenset({UPDATE_CONFIRMATION, UPDATE_REACTION, UPDATE_MINOR})
+
 
 @dataclass(frozen=True)
 class UpdateDecision:

@@ -28,9 +28,9 @@ class FakeGenerator:
                             what_it_means="Наслідок.")
 
 
-def _event(pg_engine, *, status: str, title: str) -> int:
+def _event(pg_engine, *, status: str, title: str, update_type: str | None = None) -> int:
     with Session(pg_engine) as s:
-        ev = Event(status=status, rubric="politics", title=title,
+        ev = Event(status=status, rubric="politics", title=title, update_type=update_type,
                    first_seen_at=dt.datetime.now(dt.timezone.utc))
         s.add(ev)
         s.flush()
@@ -57,3 +57,23 @@ def test_produce_drafts_only_publishable_and_idempotent(pg_engine):
 
     # second tick: events already have drafts -> nothing produced
     assert produce_drafts(sf, pipe, limit=50)["produced"] == 0
+
+
+def test_produce_drafts_skips_summary_only_update_types(pg_engine):
+    sf = make_session_factory(pg_engine)
+    e_new = _event(pg_engine, status="confirmed", title="Новий факт", update_type="new_fact")
+    e_ref = _event(pg_engine, status="confirmed", title="Спростування", update_type="refutation")
+    e_cons = _event(pg_engine, status="confirmed", title="Наслідок", update_type="consequence")
+    e_conf = _event(pg_engine, status="confirmed", title="Підтвердження", update_type="confirmation")
+    e_react = _event(pg_engine, status="confirmed", title="Реакція", update_type="reaction")
+    e_minor = _event(pg_engine, status="confirmed", title="Дрібниця", update_type="minor")
+    e_unclassified = _event(pg_engine, status="confirmed", title="Без класифікації")
+
+    pipe = EditorialPipeline(sf, generator=FakeGenerator(), stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    produce_drafts(sf, pipe, limit=50)
+
+    with Session(pg_engine) as s:
+        drafted = set(s.execute(select(Publication.event_id)).scalars().all())
+    # postworthy + unclassified are drafted; summary-only classifications are skipped
+    assert {e_new, e_ref, e_cons, e_unclassified} <= drafted
+    assert not ({e_conf, e_react, e_minor} & drafted)
