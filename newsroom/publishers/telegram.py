@@ -21,6 +21,7 @@ from typing import Callable
 log = logging.getLogger("newsroom.publishers.telegram")
 
 TELEGRAM_MAX_LEN = 4096
+TELEGRAM_CAPTION_LEN = 1024   # media caption limit
 # poster(method, payload) -> Telegram Bot API response dict ({"ok": bool, ...}).
 Poster = Callable[[str, dict], dict]
 
@@ -130,6 +131,34 @@ class TelegramPublisher:
                 return PublishResult(False, message_id=last_id, error=str(err))
             last_id = (resp.get("result") or {}).get("message_id", last_id)
         return PublishResult(True, message_id=last_id)
+
+    def send_media(self, choice, caption: str, *, chat_id: int | None = None) -> PublishResult:
+        """Send one photo/video by URL with a caption (architecture §13 cascade).
+        The caller guarantees the caption fits TELEGRAM_CAPTION_LEN."""
+        if not self.is_enabled():
+            return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
+        target = chat_id if chat_id is not None else self.active_chat_id
+        payload = {
+            "chat_id": target,
+            choice.param: choice.url,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+        resp = self._poster(choice.method, payload)
+        if not resp.get("ok"):
+            err = resp.get("description") or resp.get("error") or str(resp)
+            log.warning("telegram media publish failed", extra={"error": err})
+            return PublishResult(False, error=str(err))
+        return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id"))
+
+    def send_post(self, body: str, media_choice=None, *, chat_id: int | None = None) -> PublishResult:
+        """Publish a post: media + caption when a media choice is given and the
+        body fits a caption, otherwise text (the cascade falls back to text so a
+        long post never loses its content to caption truncation)."""
+        body = (body or "").strip()
+        if media_choice is not None and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
+            return self.send_media(media_choice, body, chat_id=chat_id)
+        return self.send_text(body, chat_id=chat_id)
 
     def _httpx_poster(self, method: str, payload: dict) -> dict:  # pragma: no cover - network
         import httpx

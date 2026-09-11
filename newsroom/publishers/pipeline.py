@@ -119,13 +119,14 @@ class Publisher:
             event = s.get(Event, pub.event_id) if pub.event_id else None
             inputs = self._gather_inputs(s, pub, event)
             body = pub.body or ""
+            media_choice = self._media_choice(s, pub.event_id)
 
         decision = evaluate_gate(inputs, self.limits)
         if not decision.allow:
             self._record_block(publication_id, decision.reasons)
             return PublishOutcome(publication_id, published=False, reasons=decision.reasons)
 
-        result = self.telegram.send_text(body)
+        result = self.telegram.send_post(body, media_choice)
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
@@ -151,6 +152,36 @@ class Publisher:
             ))
             s.commit()
             return PublishOutcome(publication_id, published=False, reasons=["send_failed"])
+
+    def _media_choice(self, s, event_id):
+        """Pick media to attach — but only for an event whose media passed the
+        §9.4 reuse check (a media_clean decision, no media_reuse). No image
+        stop-list (vision) exists yet, so unverified media never auto-attaches."""
+        from sqlalchemy import select
+
+        from newsroom.publishers.cascade import MediaItem, choose_media
+
+        if event_id is None:
+            return None
+        from newsroom.models import Decision, EventItem, Item, MediaAsset
+
+        decisions = set(s.execute(
+            select(Decision.decision).where(
+                Decision.entity_type == "event", Decision.entity_id == str(event_id),
+                Decision.stage == "verify", Decision.decision.in_(("media_clean", "media_reuse")),
+            )
+        ).scalars().all())
+        if "media_clean" not in decisions or "media_reuse" in decisions:
+            return None
+
+        rows = s.execute(
+            select(MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes)
+            .join(Item, Item.id == MediaAsset.item_id)
+            .join(EventItem, EventItem.item_id == Item.id)
+            .where(EventItem.event_id == event_id, MediaAsset.url.is_not(None))
+        ).all()
+        items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb) for k, u, w, sb in rows]
+        return choose_media(items)
 
     def _notify_supervisor(self, headline, inputs: GateInputs, message_id) -> None:
         if self.supervisor is None:

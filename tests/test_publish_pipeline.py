@@ -157,6 +157,52 @@ def test_supervisor_notified_on_rumor_publish(pg_engine):
     assert len(admin_calls) == 1 and "чутка" in admin_calls[0]["text"]
 
 
+def test_media_attached_only_after_media_clean(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, EventItem, Item, MediaAsset, Source
+
+    sf = make_session_factory(pg_engine)
+
+    def _seed_with_media(*, media_clean: bool):
+        with Session(pg_engine) as s:
+            src = Source(kind="rss", handle_or_url=f"https://mm/{media_clean}", name="MM",
+                         origin="ua", tier="media")
+            s.add(src)
+            s.flush()
+            it = Item(source_id=src.id, external_id=f"i{media_clean}", content_hash=f"h{media_clean}", title="t")
+            s.add(it)
+            s.flush()
+            s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200))
+            from newsroom.models import Event, Publication
+            ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                       first_seen_at=dt.datetime.now(UTC))
+            s.add(ev)
+            s.flush()
+            s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+            if media_clean:
+                s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                               decision="media_clean", details={"checked": 1}))
+            pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                              headline="Заголовок", body="Коротка новина.",
+                              features={"critic_ok": True, "is_rumor": False})
+            s.add(pub)
+            s.flush()
+            s.commit()
+            return pub.id
+
+    # media not verified -> text only
+    poster1 = RecordingPoster()
+    pid_unverified = _seed_with_media(media_clean=False)
+    _publisher(sf, poster1).publish_one(pid_unverified)
+    assert poster1.calls[0][0] == "sendMessage"
+
+    # media verified clean -> photo with caption
+    poster2 = RecordingPoster()
+    pid_clean = _seed_with_media(media_clean=True)
+    _publisher(sf, poster2).publish_one(pid_clean)
+    assert poster2.calls[0][0] == "sendPhoto" and poster2.calls[0][1]["photo"] == "http://x/pic.jpg"
+
+
 def test_block_decision_not_duplicated_on_repeat(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Decision
