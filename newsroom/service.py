@@ -32,6 +32,10 @@ def verify_enabled() -> bool:
     return os.getenv("VERIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def factbase_enabled() -> bool:
+    return os.getenv("FACTBASE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def factcheck_enabled() -> bool:
     return os.getenv("FACTCHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -116,6 +120,30 @@ async def verify_forever(session_factory, verifier, *, tick_seconds: float = 20.
                 log.info("verify tick", extra=bind(**stats))
         except Exception:
             log.exception("verify tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+def build_factbase_builder_from_env(session_factory):  # pragma: no cover — needs OpenAI
+    """Assemble the fact-base builder (LLM fact extractor + OpenAI embeddings)."""
+    from newsroom.analyze.embeddings import OpenAIEmbedder
+    from newsroom.factbase import FactBaseBuilder, LLMFactExtractor
+
+    return FactBaseBuilder(session_factory, extractor=LLMFactExtractor(), embedder=OpenAIEmbedder())
+
+
+async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30.0,
+                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Build the shared fact base for publishable events until stopped. Runs
+    before fact-check and editorial so both work from one viewpoint. Nothing published."""
+    from newsroom.factbase import build_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(build_pending, session_factory, builder)
+            if stats.get("events"):
+                log.info("factbase tick", extra=bind(**stats))
+        except Exception:
+            log.exception("factbase tick failed")
         await asyncio.sleep(tick_seconds)
 
 
@@ -211,6 +239,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("verification enabled")
     else:
         log.info("verification disabled (VERIFY_ENABLED off)")
+
+    if factbase_enabled():
+        builder = build_factbase_builder_from_env(session_factory)
+        tasks.append(asyncio.create_task(factbase_forever(session_factory, builder)))
+        log.info("fact base enabled")
+    else:
+        log.info("fact base disabled (FACTBASE_ENABLED off)")
 
     if factcheck_enabled():
         checker = build_factchecker_from_env(session_factory)

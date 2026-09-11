@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from newsroom.service import editorial_enabled, factcheck_enabled, verify_enabled
+from newsroom.service import (
+    editorial_enabled,
+    factbase_enabled,
+    factcheck_enabled,
+    verify_enabled,
+)
 
 FLAGS = {
     "VERIFY_ENABLED": verify_enabled,
+    "FACTBASE_ENABLED": factbase_enabled,
     "FACTCHECK_ENABLED": factcheck_enabled,
     "EDITORIAL_ENABLED": editorial_enabled,
 }
