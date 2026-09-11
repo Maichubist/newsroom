@@ -228,9 +228,33 @@ def verify_pending(session_factory, verifier: Verifier, *, limit: int = 50) -> d
             .with_for_update(skip_locked=True)
         ).scalars().all())
 
-    stats: dict[str, int] = {"processed": 0}
+    stats: dict[str, int] = {"processed": 0, "errors": 0}
     for item_id in ids:
-        result = verifier.verify_item(item_id)
+        try:
+            result = verifier.verify_item(item_id)
+        except Exception:  # noqa: BLE001 - one bad item must not block the whole queue
+            _mark_item_error(session_factory, item_id)
+            stats["errors"] += 1
+            continue
         stats["processed"] += 1
         stats[result.item_status] = stats.get(result.item_status, 0) + 1
     return stats
+
+
+def _mark_item_error(session_factory, item_id: int) -> None:
+    """Move a poison item off `new` so it is not retried forever. It can be reset
+    to `new` for replay once the cause is fixed (architecture §3, replay)."""
+    import logging
+
+    from newsroom.models import Item
+
+    logging.getLogger("newsroom.analyze.verify").warning(
+        "verify_item failed; marking item error", extra={"item_id_": item_id})
+    try:
+        with session_factory() as s:
+            item = s.get(Item, item_id)
+            if item is not None and item.status == "new":
+                item.status = "error"
+                s.commit()
+    except Exception:  # noqa: BLE001 - never let the error handler itself break the tick
+        logging.getLogger("newsroom.analyze.verify").exception("could not mark item error")

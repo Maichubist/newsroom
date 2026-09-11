@@ -42,6 +42,46 @@ class FakeClassifier:
         return Classification(is_event=True, rubrics=["politics"])
 
 
+class BoomEmbedder:
+    model = "fake-embed"
+
+    def embed(self, text):
+        if "boom" in (text or "").lower():
+            raise RuntimeError("simulated embedding 400 (too long)")
+        return _vec(5)
+
+
+def test_verify_pending_marks_poison_item_error_and_continues(pg_engine):
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="boom-src", name="S", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        good = Item(source_id=src.id, external_id="ok", title="Норм", text="normal item",
+                    content_hash="ok".ljust(64, "0"), status="new")
+        bad = Item(source_id=src.id, external_id="bad", title="Погана", text="boom text here",
+                   content_hash="bad".ljust(64, "0"), status="new")
+        s.add_all([good, bad])
+        s.commit()
+        good_id, bad_id = good.id, bad.id
+
+    verifier = Verifier(
+        sf, classifier=FakeClassifier(), embedder=BoomEmbedder(),
+        risk_matrix=load_risk_matrix(CONFIG / "risk.yaml"),
+        filters=load_filters(CONFIG / "filters.yaml"),
+        stoplist_rules=load_stoplist(CONFIG / "stoplist.yaml"),
+    )
+
+    stats = verify_pending(sf, verifier, limit=50)
+    assert stats["errors"] == 1 and stats["processed"] == 1
+
+    with Session(pg_engine) as s:
+        assert s.get(Item, bad_id).status == "error"      # poison item quarantined
+        assert s.get(Item, good_id).status != "new"       # the good one still processed
+        # the poison item does not block the queue: nothing stuck on 'new'
+        assert s.scalar(select(func.count()).select_from(Item).where(Item.status == "new")) == 0
+
+
 def test_verify_pending_processes_new_items_only(pg_engine):
     sf = make_session_factory(pg_engine)
     with Session(pg_engine) as s:
