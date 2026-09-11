@@ -34,6 +34,7 @@ from newsroom.factcheck.media import (
     MediaChecker,
     MediaCheckResult,
     MediaMatch,
+    check_media_pending,
     find_reused_media,
     phash_distance,
     select_reused,
@@ -58,7 +59,7 @@ __all__ = [
     "VerdictResult", "VerdictJudge", "LLMVerdictJudge", "parse_verdict", "apply_verdict",
     # media reuse check (§9 step 4)
     "phash_distance", "select_reused", "find_reused_media", "MediaMatch",
-    "MediaChecker", "MediaCheckResult", "DEFAULT_PHASH_MAX_DISTANCE",
+    "MediaChecker", "MediaCheckResult", "check_media_pending", "DEFAULT_PHASH_MAX_DISTANCE",
     # orchestration
     "FactChecker", "FactCheckResult", "check_pending", "CHECKABLE_STATUSES",
 ]

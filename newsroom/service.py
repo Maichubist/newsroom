@@ -48,6 +48,18 @@ def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def media_check_enabled() -> bool:
+    return os.getenv("MEDIA_CHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def reputation_enabled() -> bool:
+    return os.getenv("REPUTATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def monitoring_enabled() -> bool:
+    return os.getenv("MONITORING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -246,6 +258,55 @@ async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 
         await asyncio.sleep(tick_seconds)
 
 
+async def media_check_forever(session_factory, *, tick_seconds: float = 60.0,
+                              stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Check publishable events' media for recycled images (pHash). DB-only, no
+    LLM; dormant until media is downloaded (stage 1г). Nothing is published."""
+    from newsroom.factcheck import MediaChecker, check_media_pending
+
+    checker = MediaChecker(session_factory)
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(check_media_pending, session_factory, checker)
+            if stats.get("events"):
+                log.info("media-check tick", extra=bind(**stats))
+        except Exception:
+            log.exception("media-check tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+async def reputation_forever(session_factory, *, tick_seconds: float = 60.0,
+                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Credit source reputation (first / copy / confirmed / refuted) from settled
+    events. DB-only, no LLM."""
+    from newsroom.reputation import record_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(record_pending, session_factory)
+            if stats.get("origins") or stats.get("outcomes"):
+                log.info("reputation tick", extra=bind(**stats))
+        except Exception:
+            log.exception("reputation tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+async def monitoring_forever(session_factory, *, tick_seconds: float = 120.0,
+                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Draft corrections when a source retracts an item behind a published post
+    (architecture §9.7). DB-only, no LLM. Corrections stay drafts."""
+    from newsroom.monitoring import monitor_publications
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(monitor_publications, session_factory)
+            if stats.get("corrections"):
+                log.info("monitoring tick", extra=bind(**stats))
+        except Exception:
+            log.exception("monitoring tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def run_service() -> None:  # pragma: no cover — process entrypoint
     """`python -m newsroom.service` — the collect-only daemon."""
     from dotenv import load_dotenv
@@ -295,6 +356,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
 
+    if media_check_enabled():
+        tasks.append(asyncio.create_task(media_check_forever(session_factory)))
+        log.info("media check enabled")
+    else:
+        log.info("media check disabled (MEDIA_CHECK_ENABLED off)")
+
     if story_updates_enabled():
         updater = build_story_updater_from_env(session_factory)
         tasks.append(asyncio.create_task(story_updates_forever(session_factory, updater)))
@@ -308,6 +375,18 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("editorial drafting enabled")
     else:
         log.info("editorial drafting disabled (EDITORIAL_ENABLED off)")
+
+    if reputation_enabled():
+        tasks.append(asyncio.create_task(reputation_forever(session_factory)))
+        log.info("reputation enabled")
+    else:
+        log.info("reputation disabled (REPUTATION_ENABLED off)")
+
+    if monitoring_enabled():
+        tasks.append(asyncio.create_task(monitoring_forever(session_factory)))
+        log.info("post-publication monitoring enabled")
+    else:
+        log.info("post-publication monitoring disabled (MONITORING_ENABLED off)")
 
     await asyncio.gather(*tasks)
 

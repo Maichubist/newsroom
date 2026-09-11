@@ -151,6 +151,43 @@ class MediaChecker:
         return MediaCheckResult(event_id, checked=checked, reused=len(flags))
 
 
+def check_media_pending(session_factory, checker: "MediaChecker", *, limit: int = 25) -> dict[str, int]:
+    """One media-check tick: check publishable events that own hashed media and
+    have not been checked. Text-only events are ignored (nothing to hash), so
+    this stays dormant until media is downloaded (stage 1г)."""
+    from sqlalchemy import Integer, cast, select
+
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset
+
+    with session_factory() as s:
+        checked = (
+            select(cast(Decision.entity_id, Integer))
+            .where(Decision.entity_type == "event", Decision.stage == "verify",
+                   Decision.decision.in_(("media_clean", "media_reuse")))
+        )
+        ids = list(s.execute(
+            select(Event.id)
+            .join(EventItem, EventItem.event_id == Event.id)
+            .join(Item, Item.id == EventItem.item_id)
+            .join(MediaAsset, MediaAsset.item_id == Item.id)
+            .where(
+                Event.status.in_(("reported", "confirmed", "rumor")),
+                MediaAsset.phash.is_not(None),
+                Event.id.not_in(checked),
+            )
+            .order_by(Event.id).distinct().limit(limit)
+        ).scalars().all())
+
+    stats = {"events": 0, "reused": 0}
+    for event_id in ids:
+        result = checker.check_event(event_id)
+        if result.skipped:
+            continue
+        stats["events"] += 1
+        stats["reused"] += result.reused
+    return stats
+
+
 def _already_checked(session, event_id: int) -> bool:
     from sqlalchemy import func, select
 
