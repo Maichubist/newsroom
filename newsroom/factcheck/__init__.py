@@ -12,6 +12,13 @@ from newsroom.factcheck.evidence import (
     select_corpus_evidence,
     store_evidence,
 )
+from newsroom.factcheck.verdict import (
+    LLMVerdictJudge,
+    VerdictJudge,
+    VerdictResult,
+    apply_verdict,
+    parse_verdict,
+)
 
 __all__ = [
     # claims (§9 step 1)
@@ -19,4 +26,6 @@ __all__ = [
     # evidence (§9 step 2)
     "EvidenceRef", "EvidenceSearcher", "CorpusEvidenceSearcher",
     "select_corpus_evidence", "store_evidence",
+    # verdict (§9 step 6)
+    "VerdictResult", "VerdictJudge", "LLMVerdictJudge", "parse_verdict", "apply_verdict",
 ]
