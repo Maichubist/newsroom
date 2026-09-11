@@ -6,9 +6,11 @@ from newsroom.editorial.generator import (
     Generator,
     LLMGenerator,
 )
+from newsroom.editorial.pipeline import EditorialPipeline, ProduceResult
 
 __all__ = [
     "DraftContent", "compose_post", "parse_draft",
     "CriticReport", "critic_check",
     "Generator", "GenerationContext", "LLMGenerator", "DEFAULT_PROMPT",
+    "EditorialPipeline", "ProduceResult",
 ]

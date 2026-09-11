@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from newsroom.analyze.ai_accent import load_ai_accent
+from newsroom.analyze.stoplist import load_stoplist
+from newsroom.db import make_session_factory
+from newsroom.editorial import DraftContent, EditorialPipeline
+from newsroom.models import Event, EventItem, Item, Publication, Source, Story
+
+pytestmark = pytest.mark.pg
+
+CONFIG = Path(__file__).resolve().parents[1] / "config"
+STOP = load_stoplist(CONFIG / "stoplist.yaml")
+ACCENT = load_ai_accent(CONFIG / "ai_accent.yaml")
+
+
+class FakeGenerator:
+    model = "fake-gen"
+
+    def __init__(self, drafts):
+        self._drafts = list(drafts)
+        self.feedback_calls = []
+
+    def generate(self, ctx, *, feedback=None):
+        self.feedback_calls.append(feedback)
+        return self._drafts.pop(0) if self._drafts else self._drafts_last
+
+    _drafts_last = DraftContent(headline="Fallback", lead="Fallback lead.")
+
+
+def _event(pg_engine, *, rubric="politics", status="confirmed", title="Подія", hashtag=None) -> int:
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        story = Story(slug=f"s-{title}", title=title, state="developing",
+                      rubric=rubric, hashtag=hashtag, last_event_at=now)
+        s.add(story)
+        s.flush()
+        ev = Event(status=status, rubric=rubric, title=title, story_id=story.id, first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        src = Source(kind="rss", handle_or_url=f"{title}-src", name="Джерело", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id=f"{title}-1", content_hash=title.ljust(64, "0"))
+        s.add(it)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.commit()
+        return ev.id
+
+
+def _pub(pg_engine, event_id):
+    with Session(pg_engine) as s:
+        return s.execute(select(Publication).where(Publication.event_id == event_id)).scalar_one()
+
+
+def test_clean_draft_is_stored_and_passes(pg_engine):
+    eid = _event(pg_engine, hashtag="#політика")
+    gen = FakeGenerator([DraftContent(headline="НБУ знизив ставку", lead="Ставка — 13%.",
+                                      what_it_means="Дешевші кредити.")])
+    pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
+                             stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    r = pipe.produce(eid)
+
+    assert r.critic_ok is True and r.regenerated is False and len(gen.feedback_calls) == 1
+    pub = _pub(pg_engine, eid)
+    assert pub.status == "draft" and pub.headline == "НБУ знизив ставку"
+    assert "Що це означає: Дешевші кредити." in pub.body
+    assert pub.features["critic_ok"] is True and pub.model == "fake-gen"
+
+
+def test_ai_accent_triggers_one_regeneration(pg_engine):
+    eid = _event(pg_engine)
+    gen = FakeGenerator([
+        DraftContent(headline="Ставка", lead="Таким чином, ставку знижено."),   # soft ai_accent
+        DraftContent(headline="Ставка", lead="Ставку знижено до 13%."),          # clean
+    ])
+    pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
+                             stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    r = pipe.produce(eid)
+
+    assert r.regenerated is True and r.critic_ok is True
+    assert len(gen.feedback_calls) == 2 and gen.feedback_calls[1] is not None  # feedback passed on retry
+
+
+def test_stoplist_block_stored_but_flagged(pg_engine):
+    eid = _event(pg_engine, rubric="war", status="confirmed", title="Атака")
+    block = DraftContent(headline="Атака", lead="Шахеди курсом на Київ.")
+    gen = FakeGenerator([block, block])  # still blocked after regenerate
+    pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
+                             stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    r = pipe.produce(eid)
+
+    assert r.critic_ok is False and any(h.startswith("stoplist_block") for h in r.hard)
+    pub = _pub(pg_engine, eid)
+    assert pub.status == "draft" and pub.features["critic_ok"] is False  # not publishable
