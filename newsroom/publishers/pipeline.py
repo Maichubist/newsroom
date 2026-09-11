@@ -129,14 +129,16 @@ class Publisher:
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
+                shadow = bool(getattr(self.telegram, "shadow", False))
                 pub.status = "published"
                 pub.channel_ref = str(result.message_id) if result.message_id is not None else None
                 pub.published_at = _utc_now()
+                pub.features = {**(pub.features or {}), "shadow": shadow}
                 headline = pub.headline
                 s.add(Decision(
                     entity_type="publication", entity_id=str(publication_id), stage="publish",
                     decision="published", reason=None,
-                    details={"message_id": result.message_id, "channel": pub.channel},
+                    details={"message_id": result.message_id, "channel": pub.channel, "shadow": shadow},
                     charter_version=self.charter_version,
                 ))
                 s.commit()

@@ -19,6 +19,13 @@ from newsroom.publishers.metrics import (
     record_channel_metric,
     record_publication_metric,
 )
+from newsroom.publishers.shadow import (
+    ShadowCriteria,
+    ShadowReport,
+    dup_rate_from_simhashes,
+    load_shadow_criteria,
+    shadow_report,
+)
 
 __all__ = [
     "TelegramPublisher", "PublishResult", "split_text",
@@ -32,4 +39,7 @@ __all__ = [
     # metrics (§5.3)
     "MessageStats", "MetricsSource", "MetricsCollector", "TelethonMetricsSource",
     "record_publication_metric", "record_channel_metric",
+    # shadow mode (§2)
+    "ShadowCriteria", "ShadowReport", "load_shadow_criteria", "shadow_report",
+    "dup_rate_from_simhashes",
 ]

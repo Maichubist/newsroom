@@ -73,12 +73,16 @@ class TelegramPublisher:
         channel_chat_id: int | None,
         *,
         enabled: bool = False,
+        shadow: bool = False,
+        shadow_chat_id: int | None = None,
         poster: Poster | None = None,
         max_len: int = TELEGRAM_MAX_LEN,
     ):
         self.token = token or ""
         self.chat_id = channel_chat_id
         self.enabled = bool(enabled)
+        self.shadow = bool(shadow)
+        self.shadow_chat_id = shadow_chat_id
         self.max_len = max_len
         self._poster = poster or self._httpx_poster
 
@@ -88,18 +92,26 @@ class TelegramPublisher:
             token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             channel_chat_id=_int_or_none(os.getenv("TELEGRAM_CHANNEL_CHAT_ID")),
             enabled=os.getenv("PUBLISH_ENABLED", "false").strip().lower() in {"1", "true", "yes"},
+            shadow=os.getenv("SHADOW_MODE", "false").strip().lower() in {"1", "true", "yes"},
+            shadow_chat_id=_int_or_none(os.getenv("TELEGRAM_SHADOW_CHANNEL_CHAT_ID")),
             poster=poster,
         )
 
+    @property
+    def active_chat_id(self) -> int | None:
+        """Where channel posts go: the closed test channel in shadow mode
+        (architecture §2), otherwise the real channel."""
+        return self.shadow_chat_id if self.shadow else self.chat_id
+
     def is_enabled(self) -> bool:
-        """Master switch: publishing on AND credentials present."""
-        return self.enabled and bool(self.token) and self.chat_id is not None
+        """Master switch: publishing on AND the active target's credentials present."""
+        return self.enabled and bool(self.token) and self.active_chat_id is not None
 
     def send_text(self, text: str, *, chat_id: int | None = None, disable_preview: bool = True) -> PublishResult:
         if not self.is_enabled():
             # Hard-off: no network touched. This is the stop button.
             return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
-        target = chat_id if chat_id is not None else self.chat_id
+        target = chat_id if chat_id is not None else self.active_chat_id
         chunks = split_text(text, self.max_len)
         if not chunks:
             return PublishResult(False, error="empty text")
