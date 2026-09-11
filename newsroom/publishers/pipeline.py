@@ -39,11 +39,12 @@ def _utc_now() -> dt.datetime:
 
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
-                 charter_version: str = "0.2"):
+                 supervisor=None, charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
         self.limits = limits
+        self.supervisor = supervisor
         self.charter_version = charter_version
 
     # ------------------------------------------------------------------
@@ -131,6 +132,7 @@ class Publisher:
                 pub.status = "published"
                 pub.channel_ref = str(result.message_id) if result.message_id is not None else None
                 pub.published_at = _utc_now()
+                headline = pub.headline
                 s.add(Decision(
                     entity_type="publication", entity_id=str(publication_id), stage="publish",
                     decision="published", reason=None,
@@ -138,6 +140,7 @@ class Publisher:
                     charter_version=self.charter_version,
                 ))
                 s.commit()
+                self._notify_supervisor(headline, inputs, result.message_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
             s.add(Decision(
                 entity_type="publication", entity_id=str(publication_id), stage="publish",
@@ -146,6 +149,17 @@ class Publisher:
             ))
             s.commit()
             return PublishOutcome(publication_id, published=False, reasons=["send_failed"])
+
+    def _notify_supervisor(self, headline, inputs: GateInputs, message_id) -> None:
+        if self.supervisor is None:
+            return
+        try:
+            self.supervisor.notify_published(
+                headline=headline, risk_level=inputs.risk_level, is_rumor=inputs.is_rumor,
+                channel_ref=str(message_id) if message_id is not None else None,
+            )
+        except Exception:  # noqa: BLE001 - a failed notice must not fail the publish
+            log.exception("supervisor notify failed")
 
     def _record_block(self, publication_id: int, reasons: list[str]) -> None:
         """Journal a block, but only when it is new or the reasons changed —

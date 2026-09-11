@@ -262,13 +262,15 @@ def build_publisher_from_env(session_factory):
     """Assemble the Publisher: Telegram adapter (PUBLISH_ENABLED + credentials) +
     stop-list + limits. No OpenAI — publishing is DB + Telegram only."""
     from newsroom.analyze.stoplist import load_stoplist
-    from newsroom.publishers import Publisher, TelegramPublisher, load_limits
+    from newsroom.publishers import Publisher, Supervisor, TelegramPublisher, load_limits
 
+    telegram = TelegramPublisher.from_env()
     return Publisher(
         session_factory,
-        telegram=TelegramPublisher.from_env(),
+        telegram=telegram,
         stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
         limits=load_limits(CONFIG_DIR / "limits.yaml"),
+        supervisor=Supervisor.from_env(telegram),
     )
 
 

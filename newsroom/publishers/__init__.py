@@ -10,6 +10,7 @@ from newsroom.publishers.gate import (
     set_publishing_stopped,
 )
 from newsroom.publishers.pipeline import Publisher, PublishOutcome
+from newsroom.publishers.supervision import Supervisor, format_publish_notice
 
 __all__ = [
     "TelegramPublisher", "PublishResult", "split_text",
@@ -18,4 +19,6 @@ __all__ = [
     "is_publishing_stopped", "set_publishing_stopped", "STOP_KEY",
     # orchestration (§10, §13)
     "Publisher", "PublishOutcome",
+    # supervision (§10)
+    "Supervisor", "format_publish_notice",
 ]

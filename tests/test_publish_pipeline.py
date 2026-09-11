@@ -137,6 +137,26 @@ def test_disabled_publisher_touches_no_network_and_no_decision(pg_engine):
         assert s.scalar(select(func.count()).select_from(Decision)) == 0
 
 
+def test_supervisor_notified_on_rumor_publish(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.publishers.supervision import Supervisor
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    supervisor = Supervisor(tg, admin_chat_id=777)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, supervisor=supervisor)
+
+    # a labelled rumor in a non-critical topic (allowed) -> notice to admin
+    _ev, pid = _draft(pg_engine, status="rumor", risk_level="low",
+                      body="Чутка\n\nПодейкують, щось сталося.", is_rumor=True)
+    outcome = publisher.publish_one(pid)
+    assert outcome.published is True
+    # two sends: the channel post + the admin notice
+    admin_calls = [p for _, p in poster.calls if p["chat_id"] == 777]
+    assert len(admin_calls) == 1 and "чутка" in admin_calls[0]["text"]
+
+
 def test_block_decision_not_duplicated_on_repeat(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Decision
