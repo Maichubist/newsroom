@@ -11,7 +11,8 @@ from newsroom.publishers.gate import (
     set_publishing_stopped,
 )
 from newsroom.publishers.pipeline import Publisher, PublishOutcome
-from newsroom.publishers.supervision import Supervisor, format_publish_notice
+from newsroom.publishers.supervision import Supervisor, format_publish_notice, supervision_keyboard
+from newsroom.publishers.bot import CallbackAction, SupervisionBot, parse_callback
 from newsroom.publishers.metrics import (
     MessageStats,
     MetricsCollector,
@@ -38,7 +39,8 @@ __all__ = [
     # orchestration (§10, §13)
     "Publisher", "PublishOutcome",
     # supervision (§10)
-    "Supervisor", "format_publish_notice",
+    "Supervisor", "format_publish_notice", "supervision_keyboard",
+    "SupervisionBot", "CallbackAction", "parse_callback",
     # metrics (§5.3)
     "MessageStats", "MetricsSource", "MetricsCollector", "TelethonMetricsSource",
     "record_publication_metric", "record_channel_metric",

@@ -143,7 +143,7 @@ class Publisher:
                     charter_version=self.charter_version,
                 ))
                 s.commit()
-                self._notify_supervisor(headline, inputs, result.message_id)
+                self._notify_supervisor(publication_id, headline, inputs, result.message_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
             s.add(Decision(
                 entity_type="publication", entity_id=str(publication_id), stage="publish",
@@ -183,13 +183,14 @@ class Publisher:
         items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb) for k, u, w, sb in rows]
         return choose_media(items)
 
-    def _notify_supervisor(self, headline, inputs: GateInputs, message_id) -> None:
+    def _notify_supervisor(self, publication_id, headline, inputs: GateInputs, message_id) -> None:
         if self.supervisor is None:
             return
         try:
             self.supervisor.notify_published(
                 headline=headline, risk_level=inputs.risk_level, is_rumor=inputs.is_rumor,
                 channel_ref=str(message_id) if message_id is not None else None,
+                publication_id=publication_id,
             )
         except Exception:  # noqa: BLE001 - a failed notice must not fail the publish
             log.exception("supervisor notify failed")

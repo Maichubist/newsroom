@@ -48,18 +48,32 @@ class Supervisor:
     def enabled(self) -> bool:
         return bool(self.telegram.is_enabled() and self.admin_chat_id is not None)
 
-    def notify(self, text: str) -> bool:
+    def notify(self, text: str, *, reply_markup: dict | None = None) -> bool:
         if not self.enabled():
             return False
-        result = self.telegram.send_text(text, chat_id=self.admin_chat_id, disable_preview=True)
+        result = self.telegram.send_text(text, chat_id=self.admin_chat_id, disable_preview=True,
+                                         reply_markup=reply_markup)
         if not result.ok:
             log.warning("supervisor notice failed", extra={"error": result.error})
         return result.ok
 
     def notify_published(self, *, headline: str | None, risk_level: str | None,
-                         is_rumor: bool, channel_ref: str | None = None) -> bool:
-        """Notify only for the posts that matter: critical-topic or rumor."""
+                         is_rumor: bool, channel_ref: str | None = None,
+                         publication_id: int | None = None) -> bool:
+        """Notify only for the posts that matter: critical-topic or rumor. The
+        notice carries Recall/Stop buttons the supervision bot acts on (§10)."""
         if not (risk_level == "critical" or is_rumor):
             return False
-        return self.notify(format_publish_notice(
-            headline=headline, risk_level=risk_level, is_rumor=is_rumor, channel_ref=channel_ref))
+        text = format_publish_notice(headline=headline, risk_level=risk_level,
+                                     is_rumor=is_rumor, channel_ref=channel_ref)
+        return self.notify(text, reply_markup=supervision_keyboard(publication_id))
+
+
+def supervision_keyboard(publication_id: int | None) -> dict:
+    """Inline keyboard for a publication notice: recall this post, or halt all
+    publishing. callback_data is what the supervision bot dispatches on."""
+    buttons: list[dict] = []
+    if publication_id is not None:
+        buttons.append({"text": "↩︎ Відкликати", "callback_data": f"retract:{publication_id}"})
+    buttons.append({"text": "⏸ Стоп", "callback_data": "stop"})
+    return {"inline_keyboard": [buttons]}

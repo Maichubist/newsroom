@@ -411,6 +411,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if publisher.telegram.is_enabled():
         tasks.append(asyncio.create_task(publish_forever(session_factory, publisher)))
         log.info("publishing enabled")
+        if os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip():
+            from newsroom.publishers import SupervisionBot
+
+            bot = SupervisionBot(session_factory, publisher.telegram)
+            tasks.append(asyncio.create_task(bot.poll_forever()))
+            log.info("supervision bot enabled")
     else:
         log.info("publishing disabled (PUBLISH_ENABLED off or no credentials)")
 

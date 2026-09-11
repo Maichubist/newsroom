@@ -108,7 +108,8 @@ class TelegramPublisher:
         """Master switch: publishing on AND the active target's credentials present."""
         return self.enabled and bool(self.token) and self.active_chat_id is not None
 
-    def send_text(self, text: str, *, chat_id: int | None = None, disable_preview: bool = True) -> PublishResult:
+    def send_text(self, text: str, *, chat_id: int | None = None, disable_preview: bool = True,
+                  reply_markup: dict | None = None) -> PublishResult:
         if not self.is_enabled():
             # Hard-off: no network touched. This is the stop button.
             return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
@@ -118,13 +119,16 @@ class TelegramPublisher:
             return PublishResult(False, error="empty text")
 
         last_id: int | None = None
-        for chunk in chunks:
-            resp = self._poster("sendMessage", {
+        for i, chunk in enumerate(chunks):
+            payload = {
                 "chat_id": target,
                 "text": chunk,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": disable_preview,
-            })
+            }
+            if reply_markup is not None and i == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup   # buttons only on the final chunk
+            resp = self._poster("sendMessage", payload)
             if not resp.get("ok"):
                 err = resp.get("description") or resp.get("error") or str(resp)
                 log.warning("telegram publish failed", extra={"error": err})
@@ -159,6 +163,30 @@ class TelegramPublisher:
         if media_choice is not None and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
             return self.send_media(media_choice, body, chat_id=chat_id)
         return self.send_text(body, chat_id=chat_id)
+
+    def delete_message(self, chat_id: int | None, message_id: int) -> bool:
+        """Delete a channel message (used to retract a post). No enable gate: a
+        retract must work even while publishing is halted."""
+        if not (self.token and chat_id is not None):
+            return False
+        resp = self._poster("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        return bool(resp.get("ok"))
+
+    def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> bool:
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        return bool(self._poster("answerCallbackQuery", payload).get("ok"))
+
+    def get_updates(self, *, offset: int | None = None, timeout: int = 25,
+                    allowed_updates: list[str] | None = None) -> list[dict]:  # pragma: no cover - network
+        payload: dict = {"timeout": timeout}
+        if offset is not None:
+            payload["offset"] = offset
+        if allowed_updates is not None:
+            payload["allowed_updates"] = allowed_updates
+        resp = self._poster("getUpdates", payload)
+        return resp.get("result") or [] if resp.get("ok") else []
 
     def _httpx_poster(self, method: str, payload: dict) -> dict:  # pragma: no cover - network
         import httpx
