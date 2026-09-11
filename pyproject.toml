@@ -23,6 +23,11 @@ dev = [
     "testcontainers[postgres]>=4.8",
     # pytest-asyncio is added in M6 together with the async Telethon collector.
 ]
+# Image decoding for the media-download pipeline (pHash). Optional: the core and
+# tests use a pluggable decoder and never need this installed.
+media = [
+    "pillow>=10",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
