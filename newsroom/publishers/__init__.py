@@ -11,6 +11,14 @@ from newsroom.publishers.gate import (
 )
 from newsroom.publishers.pipeline import Publisher, PublishOutcome
 from newsroom.publishers.supervision import Supervisor, format_publish_notice
+from newsroom.publishers.metrics import (
+    MessageStats,
+    MetricsCollector,
+    MetricsSource,
+    TelethonMetricsSource,
+    record_channel_metric,
+    record_publication_metric,
+)
 
 __all__ = [
     "TelegramPublisher", "PublishResult", "split_text",
@@ -21,4 +29,7 @@ __all__ = [
     "Publisher", "PublishOutcome",
     # supervision (§10)
     "Supervisor", "format_publish_notice",
+    # metrics (§5.3)
+    "MessageStats", "MetricsSource", "MetricsCollector", "TelethonMetricsSource",
+    "record_publication_metric", "record_channel_metric",
 ]
