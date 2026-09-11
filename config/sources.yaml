@@ -54,3 +54,19 @@ sources:
   - {name: "MIT Technology Review", kind: rss, handle_or_url: "https://www.technologyreview.com/feed/", origin: world, lang: en, tier: media}
   - {name: "VentureBeat AI", kind: rss, handle_or_url: "https://venturebeat.com/category/ai/feed/", origin: world, lang: en, tier: media}
   - {name: "Defense News", kind: rss, handle_or_url: "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", origin: world, lang: en, tier: media}
+
+  # --- Telegram channels (auto-imported, then curated) ---
+  # Жоден із цих каналів не є офіційним держджерелом (tier: official). Новинні
+  # аґреґатори, OSINT-моніторинги і персональні блогери -> aggregator; анонімні
+  # інсайдерські канали -> anonymous. За хартією (3.1) aggregator/anonymous НЕ
+  # проходять gate самостійно для критичних тем (війна/оборона) — потрібне
+  # підтвердження офіційним або медіа-джерелом. Справжні official-канали
+  # (Генштаб @generalstaff_ua, Повітряні Сили @kpszsu тощо) додати окремо.
+  - {name: "NEXTA Live", kind: telegram, handle_or_url: "@nexta_live", origin: ua, tier: aggregator}
+  - {name: "INSIDER UA | Україна | Новини", kind: telegram, handle_or_url: "@insiderUKR", origin: ua, lang: uk, tier: aggregator}
+  - {name: "STERNENKO", kind: telegram, handle_or_url: "@ssternenko", origin: ua, lang: uk, tier: aggregator}
+  - {name: "Лачен пише", kind: telegram, handle_or_url: "@lachentyt", origin: ua, lang: uk, tier: aggregator}
+  - {name: "monitor", kind: telegram, handle_or_url: "@war_monitor", origin: ua, tier: aggregator}
+  - {name: "Скринька Пандори", kind: telegram, handle_or_url: "@pandoras_box_ua", origin: ua, lang: uk, tier: anonymous}
+  - {name: "Бавовна", kind: telegram, handle_or_url: "@ukrbavovna", origin: ua, lang: uk, tier: aggregator}
+  - {name: "✙ 🔼Вертикаль", kind: telegram, handle_or_url: "@vert2026", origin: ua, lang: uk, tier: aggregator}

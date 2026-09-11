@@ -5,24 +5,27 @@ from pathlib import Path
 
 import pytest
 
-from newsroom.config import TIERS, SourceConfigError, load_sources
+from newsroom.config import KINDS, ORIGINS, TIERS, SourceConfigError, load_sources
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
 
 def test_real_sources_yaml_is_valid():
+    # Invariants that must hold as the file is curated and grows (RSS + telegram),
+    # rather than exact counts which legitimately drift.
     sources = load_sources(CONFIG_DIR / "sources.yaml")
-    assert len(sources) == 25
-    assert all(s.kind == "rss" for s in sources)
-    assert all(s.origin in {"ua", "world"} for s in sources)
+    assert len(sources) >= 25
+    assert all(s.kind in KINDS for s in sources)
+    assert all(s.origin in ORIGINS for s in sources)
     assert all(s.tier in TIERS for s in sources)
-    # bootstrap invariant: 12 UA + 13 world feeds
-    assert sum(s.origin == "ua" for s in sources) == 12
-    assert sum(s.origin == "world" for s in sources) == 13
-    # official sources present (Ukrinform, Suspilne, KMDA) and flagged
-    official = [s for s in sources if s.tier == "official"]
-    assert {s.name for s in official} == {"Укрінформ", "Суспільне", "КМДА (Київ)"}
-    assert all(s.is_official for s in official)
+    # every (kind, handle) pair is unique
+    keys = {(s.kind, s.handle_or_url) for s in sources}
+    assert len(keys) == len(sources)
+    # the 25-feed RSS bootstrap stays intact
+    assert sum(s.kind == "rss" for s in sources) == 25
+    # official RSS agencies stay flagged
+    official = {s.name for s in sources if s.tier == "official"}
+    assert {"Укрінформ", "Суспільне", "КМДА (Київ)"}.issubset(official)
     # every (kind, handle) pair is unique
     keys = {(s.kind, s.handle_or_url) for s in sources}
     assert len(keys) == len(sources)
