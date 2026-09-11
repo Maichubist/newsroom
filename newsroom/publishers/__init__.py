@@ -9,10 +9,13 @@ from newsroom.publishers.gate import (
     load_limits,
     set_publishing_stopped,
 )
+from newsroom.publishers.pipeline import Publisher, PublishOutcome
 
 __all__ = [
     "TelegramPublisher", "PublishResult", "split_text",
     # gate (§10)
     "GateInputs", "GateDecision", "Limits", "evaluate_gate", "load_limits",
     "is_publishing_stopped", "set_publishing_stopped", "STOP_KEY",
+    # orchestration (§10, §13)
+    "Publisher", "PublishOutcome",
 ]
