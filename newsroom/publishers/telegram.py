@@ -109,7 +109,7 @@ class TelegramPublisher:
         return self.enabled and bool(self.token) and self.active_chat_id is not None
 
     def send_text(self, text: str, *, chat_id: int | None = None, disable_preview: bool = True,
-                  reply_markup: dict | None = None) -> PublishResult:
+                  reply_markup: dict | None = None, reply_to_message_id: int | None = None) -> PublishResult:
         if not self.is_enabled():
             # Hard-off: no network touched. This is the stop button.
             return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
@@ -128,6 +128,11 @@ class TelegramPublisher:
             }
             if reply_markup is not None and i == len(chunks) - 1:
                 payload["reply_markup"] = reply_markup   # buttons only on the final chunk
+            if reply_to_message_id is not None and i == 0:
+                # chain only the first chunk to the parent; a missing parent must
+                # not drop the post (story reply-chaining, §7)
+                payload["reply_to_message_id"] = reply_to_message_id
+                payload["allow_sending_without_reply"] = True
             resp = self._poster("sendMessage", payload)
             if not resp.get("ok"):
                 err = resp.get("description") or resp.get("error") or str(resp)
@@ -136,7 +141,8 @@ class TelegramPublisher:
             last_id = (resp.get("result") or {}).get("message_id", last_id)
         return PublishResult(True, message_id=last_id)
 
-    def send_media(self, choice, caption: str, *, chat_id: int | None = None) -> PublishResult:
+    def send_media(self, choice, caption: str, *, chat_id: int | None = None,
+                   reply_to_message_id: int | None = None) -> PublishResult:
         """Send one photo/video by URL with a caption (architecture §13 cascade).
         The caller guarantees the caption fits TELEGRAM_CAPTION_LEN."""
         if not self.is_enabled():
@@ -148,6 +154,9 @@ class TelegramPublisher:
             "caption": caption,
             "parse_mode": "HTML",
         }
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
         resp = self._poster(choice.method, payload)
         if not resp.get("ok"):
             err = resp.get("description") or resp.get("error") or str(resp)
@@ -155,14 +164,16 @@ class TelegramPublisher:
             return PublishResult(False, error=str(err))
         return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id"))
 
-    def send_post(self, body: str, media_choice=None, *, chat_id: int | None = None) -> PublishResult:
+    def send_post(self, body: str, media_choice=None, *, chat_id: int | None = None,
+                  reply_to_message_id: int | None = None) -> PublishResult:
         """Publish a post: media + caption when a media choice is given and the
         body fits a caption, otherwise text (the cascade falls back to text so a
         long post never loses its content to caption truncation)."""
         body = (body or "").strip()
         if media_choice is not None and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
-            return self.send_media(media_choice, body, chat_id=chat_id)
-        return self.send_text(body, chat_id=chat_id)
+            return self.send_media(media_choice, body, chat_id=chat_id,
+                                   reply_to_message_id=reply_to_message_id)
+        return self.send_text(body, chat_id=chat_id, reply_to_message_id=reply_to_message_id)
 
     def delete_message(self, chat_id: int | None, message_id: int) -> bool:
         """Delete a channel message (used to retract a post). No enable gate: a

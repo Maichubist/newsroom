@@ -120,13 +120,14 @@ class Publisher:
             inputs = self._gather_inputs(s, pub, event)
             body = pub.body or ""
             media_choice = self._media_choice(s, pub.event_id)
+            reply_to_pub_id, reply_to_message_id = self._story_reply_target(s, event)
 
         decision = evaluate_gate(inputs, self.limits)
         if not decision.allow:
             self._record_block(publication_id, decision.reasons)
             return PublishOutcome(publication_id, published=False, reasons=decision.reasons)
 
-        result = self.telegram.send_post(body, media_choice)
+        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id)
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
@@ -135,6 +136,8 @@ class Publisher:
                 pub.channel_ref = str(result.message_id) if result.message_id is not None else None
                 pub.published_at = _utc_now()
                 pub.features = {**(pub.features or {}), "shadow": shadow}
+                if reply_to_pub_id is not None:
+                    pub.reply_to_publication_id = reply_to_pub_id
                 headline = pub.headline
                 s.add(Decision(
                     entity_type="publication", entity_id=str(publication_id), stage="publish",
@@ -187,6 +190,37 @@ class Publisher:
         ).all()
         items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb) for k, u, w, sb in rows]
         return choose_media(items)
+
+    def _story_reply_target(self, s, event):
+        """The story's most recent published Telegram post in the current channel
+        context, so this post replies to it (architecture §7). Returns
+        (publication_id, message_id) or (None, None)."""
+        from sqlalchemy import select
+
+        from newsroom.models import Event, Publication
+
+        if event is None or event.story_id is None:
+            return None, None
+        shadow = bool(getattr(self.telegram, "shadow", False))
+        row = s.execute(
+            select(Publication.id, Publication.channel_ref)
+            .join(Event, Event.id == Publication.event_id)
+            .where(
+                Event.story_id == event.story_id,
+                Publication.channel == "telegram",
+                Publication.status == "published",
+                Publication.channel_ref.is_not(None),
+                Publication.features["shadow"].as_boolean().is_(shadow),
+            )
+            .order_by(Publication.published_at.desc())
+        ).first()
+        if row is None:
+            return None, None
+        pub_id, channel_ref = row
+        try:
+            return pub_id, int(channel_ref)
+        except (TypeError, ValueError):
+            return pub_id, None
 
     def _notify_supervisor(self, publication_id, headline, inputs: GateInputs, message_id) -> None:
         if self.supervisor is None:

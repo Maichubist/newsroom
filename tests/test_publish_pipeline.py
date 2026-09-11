@@ -211,6 +211,48 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
     assert p3.calls[0][0] == "sendPhoto" and p3.calls[0][1]["photo"] == "http://x/pic.jpg"
 
 
+def test_story_second_post_replies_to_first(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication, Story
+
+    sf = make_session_factory(pg_engine)
+
+    with Session(pg_engine) as s:
+        story = Story(slug="s-reply", title="Сюжет", state="developing",
+                      last_event_at=dt.datetime.now(UTC))
+        s.add(story)
+        s.flush()
+
+        def _draft_on_story(title):
+            ev = Event(status="confirmed", risk_level="low", rubric="economy", title=title,
+                       story_id=story.id, first_seen_at=dt.datetime.now(UTC))
+            s.add(ev)
+            s.flush()
+            pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                              headline=title, body=f"{title}: суть.",
+                              features={"critic_ok": True, "is_rumor": False})
+            s.add(pub)
+            s.flush()
+            return pub.id
+
+        first_id = _draft_on_story("Перша подія")
+        second_id = _draft_on_story("Друга подія")
+        s.commit()
+
+    poster = RecordingPoster()   # each call returns message_id = 500 + call number
+    publisher = _publisher(sf, poster)
+
+    r1 = publisher.publish_one(first_id)
+    assert r1.published and poster.calls[0][1].get("reply_to_message_id") is None  # first has no parent
+
+    r2 = publisher.publish_one(second_id)
+    assert r2.published
+    # the second post replies to the first post's channel message id (501)
+    assert poster.calls[-1][1]["reply_to_message_id"] == 501
+    with Session(pg_engine) as s:
+        assert s.get(Publication, second_id).reply_to_publication_id == first_id
+
+
 def test_block_decision_not_duplicated_on_repeat(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Decision
