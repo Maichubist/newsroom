@@ -66,10 +66,12 @@ class FakeClassifier:
 
 def _linked_event(pg_engine, *, status="confirmed"):
     """A story with one event and the bare StoryVersion the linker would create."""
+    import uuid
+
     from newsroom.models import Event, Story, StoryVersion
 
     with Session(pg_engine) as s:
-        story = Story(slug="s1", title="Сюжет", state="developing",
+        story = Story(slug=f"s-{uuid.uuid4().hex[:8]}", title="Сюжет", state="developing",
                       last_event_at=dt.datetime.now(dt.timezone.utc))
         s.add(story)
         s.flush()

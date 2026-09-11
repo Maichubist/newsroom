@@ -76,7 +76,6 @@ class EventClusterer:
                 select(Event).where(
                     Event.centroid.is_not(None),
                     Event.updated_at >= cutoff,
-                    Event.closed_at.is_(None),
                 )
             ).scalars().all())
 

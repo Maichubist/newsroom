@@ -20,11 +20,14 @@ def _published_event_with_source_item(pg_engine, *, deleted: bool, status="publi
     """A published post over an event fed by one source item (optionally deleted)."""
     from newsroom.models import Event, EventItem, Item, Publication, Source
 
+    import uuid
+
+    tag = uuid.uuid4().hex[:8]
     with Session(pg_engine) as s:
-        src = Source(kind="telegram", handle_or_url="t.me/x", name="X", origin="ua", tier="media")
+        src = Source(kind="telegram", handle_or_url=f"t.me/{tag}", name="X", origin="ua", tier="media")
         s.add(src)
         s.flush()
-        item = Item(source_id=src.id, external_id="i1", content_hash="i1", title="post",
+        item = Item(source_id=src.id, external_id=f"i{tag}", content_hash=f"i{tag}", title="post",
                     deleted_at=(dt.datetime.now(UTC) if deleted else None))
         s.add(item)
         s.flush()

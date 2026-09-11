@@ -32,3 +32,24 @@ def pg_engine():
     finally:
         engine.dispose()
         container.stop()
+
+
+@pytest.fixture(autouse=True)
+def _clean_db(request):
+    """Isolate pg tests: truncate every table after each one, so global counts
+    start clean and ids are predictable. The container is session-scoped for
+    speed; this gives per-test isolation without restarting it. Offline tests
+    never touch pg_engine (this is a no-op unless the test is @pytest.mark.pg)."""
+    is_pg = request.node.get_closest_marker("pg") is not None
+    engine = request.getfixturevalue("pg_engine") if is_pg else None   # resolve before yield
+    yield
+    if engine is None:
+        return
+    from sqlalchemy import text
+
+    from newsroom.db.base import Base
+
+    tables = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
+    if tables:
+        with engine.begin() as conn:
+            conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))

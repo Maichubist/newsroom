@@ -408,8 +408,11 @@ async def metrics_forever(session_factory, collector, channel_chat_id, *,
     client = await collector.wait_client()
     try:
         entity = await client.get_entity(channel_chat_id)
-    except Exception:
-        log.exception("metrics: cannot resolve publish channel; metrics off")
+    except Exception as exc:  # noqa: BLE001
+        # Expected until the reading account is a member of the publish channel:
+        # Telethon can only resolve a channel it has seen. Metrics stay off.
+        log.warning("metrics off: reading account cannot resolve the publish channel "
+                    "(join it with that account first)", extra=bind(error=str(exc)))
         return
 
     source = TelethonMetricsSource(client, entity, loop)
