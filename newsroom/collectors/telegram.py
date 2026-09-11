@@ -253,6 +253,13 @@ class TelegramCollector:
         self.buffer = AlbumBuffer(album_debounce)
         self._sleeper = floodwait_sleeper
         self._client = None  # telethon.TelegramClient, created in start()
+        self._client_ready = asyncio.Event()  # set once the client is connected
+
+    async def wait_client(self):  # pragma: no cover - shared with the metrics loop
+        """Block until start() has connected, then hand back the live client so a
+        second consumer (metrics) reuses this single session (architecture §11)."""
+        await self._client_ready.wait()
+        return self._client
 
     # ---- persistence ----
     def _persist(self, raw: RawItem) -> int:
@@ -344,6 +351,7 @@ class TelegramCollector:
         client = self._connect()
         await client.start()
         self._client = client
+        self._client_ready.set()   # unblock the metrics loop (shared session)
 
         sources = self._telegram_sources()
         by_username = {handle.lstrip("@").lower(): sid for sid, handle in sources}

@@ -68,6 +68,10 @@ def monitoring_enabled() -> bool:
     return os.getenv("MONITORING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def metrics_enabled() -> bool:
+    return os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -390,6 +394,40 @@ async def monitoring_forever(session_factory, *, tick_seconds: float = 120.0,
         await asyncio.sleep(tick_seconds)
 
 
+async def metrics_forever(session_factory, collector, channel_chat_id, *,
+                          tick_seconds: float = 600.0, channel_every: int = 6,
+                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Snapshot publication and channel metrics via the collector's shared Telethon
+    session (architecture §5.3, §11). Waits for the collector to connect, resolves
+    the publish channel once, then polls on a slow cadence. The reading account
+    must be a member of the publish channel to see message stats.
+    """
+    from newsroom.publishers import MetricsCollector, TelethonMetricsSource
+
+    loop = asyncio.get_running_loop()
+    client = await collector.wait_client()
+    try:
+        entity = await client.get_entity(channel_chat_id)
+    except Exception:
+        log.exception("metrics: cannot resolve publish channel; metrics off")
+        return
+
+    source = TelethonMetricsSource(client, entity, loop)
+    mc = MetricsCollector(session_factory, source, channel="telegram")
+    ticks = 0
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(mc.collect_publications)
+            if ticks % channel_every == 0:
+                await asyncio.to_thread(mc.collect_channel)
+            if stats.get("recorded"):
+                log.info("metrics tick", extra=bind(**stats))
+        except Exception:
+            log.exception("metrics tick failed")
+        ticks += 1
+        await asyncio.sleep(tick_seconds)
+
+
 async def run_service() -> None:  # pragma: no cover — process entrypoint
     """`python -m newsroom.service` — the collect-only daemon."""
     from dotenv import load_dotenv
@@ -412,8 +450,10 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         s.commit()
 
     tasks = [asyncio.create_task(poll_rss_forever(session_factory))]
+    telegram_collector = None
     if telegram_enabled():
-        tasks.append(asyncio.create_task(TelegramCollector(session_factory).start()))
+        telegram_collector = TelegramCollector(session_factory)
+        tasks.append(asyncio.create_task(telegram_collector.start()))
         log.info("telegram collection enabled")
     else:
         log.info("telegram collection disabled (COLLECTOR_TELEGRAM_ENABLED off)")
@@ -497,6 +537,17 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("post-publication monitoring enabled")
     else:
         log.info("post-publication monitoring disabled (MONITORING_ENABLED off)")
+
+    if metrics_enabled():
+        channel_chat_id = publisher.telegram.active_chat_id
+        if telegram_collector is not None and channel_chat_id is not None:
+            tasks.append(asyncio.create_task(
+                metrics_forever(session_factory, telegram_collector, channel_chat_id)))
+            log.info("metrics enabled")
+        else:
+            log.info("metrics disabled (needs telegram collection + a publish channel)")
+    else:
+        log.info("metrics disabled (METRICS_ENABLED off)")
 
     await asyncio.gather(*tasks)
 

@@ -9,6 +9,7 @@ from newsroom.service import (
     media_check_enabled,
     media_download_enabled,
     media_moderation_enabled,
+    metrics_enabled,
     monitoring_enabled,
     reputation_enabled,
     story_updates_enabled,
@@ -26,6 +27,7 @@ FLAGS = {
     "MEDIA_MODERATION_ENABLED": media_moderation_enabled,
     "REPUTATION_ENABLED": reputation_enabled,
     "MONITORING_ENABLED": monitoring_enabled,
+    "METRICS_ENABLED": metrics_enabled,
 }
 
 

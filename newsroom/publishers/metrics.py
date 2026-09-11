@@ -126,15 +126,27 @@ class MetricsCollector:
 
 class TelethonMetricsSource:  # pragma: no cover - network / MTProto
     """Reads channel message stats and subscriber counts via the Telethon account
-    (the same reading account as the collector; not the publishing bot)."""
+    (the same reading account as the collector; not the publishing bot).
 
-    def __init__(self, client, channel_entity):
+    The collector is being driven from `loop`, so this source — called from the
+    metrics worker thread — schedules Telethon's async calls back onto that loop
+    with run_coroutine_threadsafe rather than opening a second session (§11).
+    """
+
+    def __init__(self, client, channel_entity, loop, *, timeout: float = 30.0):
         self._client = client
         self._entity = channel_entity
+        self._loop = loop
+        self._timeout = timeout
+
+    def _run(self, coro):
+        import asyncio
+
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=self._timeout)
 
     def message_stats(self, channel_ref: str) -> MessageStats | None:
         try:
-            msg = self._client.get_messages(self._entity, ids=int(channel_ref))
+            msg = self._run(self._client.get_messages(self._entity, ids=int(channel_ref)))
         except Exception:
             return None
         if msg is None:
@@ -150,8 +162,10 @@ class TelethonMetricsSource:  # pragma: no cover - network / MTProto
                             forwards=getattr(msg, "forwards", None))
 
     def channel_subscribers(self, channel: str) -> int | None:
+        from telethon.tl.functions.channels import GetFullChannelRequest
+
         try:
-            full = self._client.get_entity(self._entity)
-            return getattr(full, "participants_count", None)
+            full = self._run(self._client(GetFullChannelRequest(self._entity)))
+            return int(full.full_chat.participants_count)
         except Exception:
             return None

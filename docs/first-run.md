@@ -206,6 +206,21 @@ docker compose exec db psql -U newsroom -d newsroom -c "select stage,decision,re
 
 ---
 
+## Метрики (опційно)
+
+`METRICS_ENABLED=true` вмикає збір перегляди/реакції/пересилання постів і кількість
+підписників каналу. Читаються **тим самим Telethon-акаунтом**, що й збір, тож
+потрібні `COLLECTOR_TELEGRAM_ENABLED=true` і щоб цей акаунт був **підписаний на
+канал публікації** (тестовий або бойовий). Працює і в тіньовому режимі.
+
+Останні знімки метрик:
+
+```bash
+docker compose exec db psql -U newsroom -d newsroom -c "select publication_id, views, forwards, measured_at from publication_metrics order by id desc limit 20;"
+```
+
+---
+
 ## Швидка діагностика
 
 Скільки чого в базі:
