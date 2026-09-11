@@ -1,0 +1,16 @@
+# Матриця ризиків (charter §3.1). Рубрика -> рівень ризику; рівень визначає
+# умову автономної публікації (див. newsroom/analyze/risk.py::decide).
+# Якщо новина має кілька рубрик — береться НАЙВИЩИЙ рівень (charter: "при
+# неоднозначності застосовується вищий"). Невідома рубрика -> default_level.
+version: "0.2"
+
+levels:
+  # критичний: лише після офіційного джерела
+  critical: [war, defense, security, strikes]
+  # високий: 2+ незалежних надійних джерела або першоджерело; чутки за правилом 3.7
+  high: [politics, society, accusations, corruption, crime, mobilization]
+  # низький: 1 джерело з високою репутацією
+  low: [economy, technology, science, culture, sport, lifestyle]
+
+# Невідома/невизначена рубрика — консервативно (не low).
+default_level: high
