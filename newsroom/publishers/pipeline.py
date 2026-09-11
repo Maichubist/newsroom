@@ -154,9 +154,10 @@ class Publisher:
             return PublishOutcome(publication_id, published=False, reasons=["send_failed"])
 
     def _media_choice(self, s, event_id):
-        """Pick media to attach — but only for an event whose media passed the
-        §9.4 reuse check (a media_clean decision, no media_reuse). No image
-        stop-list (vision) exists yet, so unverified media never auto-attaches."""
+        """Pick media to attach — but only for an event whose media passed BOTH
+        the §9.4 reuse check (media_clean, no media_reuse) AND the image stop-list
+        / vision check (media_vision_ok, no media_vision_block). In doubt, no
+        media (§3.5)."""
         from sqlalchemy import select
 
         from newsroom.publishers.cascade import MediaItem, choose_media
@@ -168,10 +169,14 @@ class Publisher:
         decisions = set(s.execute(
             select(Decision.decision).where(
                 Decision.entity_type == "event", Decision.entity_id == str(event_id),
-                Decision.stage == "verify", Decision.decision.in_(("media_clean", "media_reuse")),
+                Decision.stage == "verify",
+                Decision.decision.in_(("media_clean", "media_reuse",
+                                       "media_vision_ok", "media_vision_block")),
             )
         ).scalars().all())
-        if "media_clean" not in decisions or "media_reuse" in decisions:
+        reuse_ok = "media_clean" in decisions and "media_reuse" not in decisions
+        vision_ok = "media_vision_ok" in decisions and "media_vision_block" not in decisions
+        if not (reuse_ok and vision_ok):
             return None
 
         rows = s.execute(

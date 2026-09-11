@@ -157,19 +157,21 @@ def test_supervisor_notified_on_rumor_publish(pg_engine):
     assert len(admin_calls) == 1 and "чутка" in admin_calls[0]["text"]
 
 
-def test_media_attached_only_after_media_clean(pg_engine):
+def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Decision, EventItem, Item, MediaAsset, Source
 
     sf = make_session_factory(pg_engine)
+    seq = {"n": 0}
 
-    def _seed_with_media(*, media_clean: bool):
+    def _seed_with_media(*, reuse_ok: bool, vision_ok: bool):
+        seq["n"] += 1
+        tag = seq["n"]
         with Session(pg_engine) as s:
-            src = Source(kind="rss", handle_or_url=f"https://mm/{media_clean}", name="MM",
-                         origin="ua", tier="media")
+            src = Source(kind="rss", handle_or_url=f"https://mm/{tag}", name="MM", origin="ua", tier="media")
             s.add(src)
             s.flush()
-            it = Item(source_id=src.id, external_id=f"i{media_clean}", content_hash=f"h{media_clean}", title="t")
+            it = Item(source_id=src.id, external_id=f"i{tag}", content_hash=f"h{tag}", title="t")
             s.add(it)
             s.flush()
             s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200))
@@ -179,9 +181,12 @@ def test_media_attached_only_after_media_clean(pg_engine):
             s.add(ev)
             s.flush()
             s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
-            if media_clean:
+            if reuse_ok:
                 s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
                                decision="media_clean", details={"checked": 1}))
+            if vision_ok:
+                s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                               decision="media_vision_ok", details={"checked": 1}))
             pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
                               headline="Заголовок", body="Коротка новина.",
                               features={"critic_ok": True, "is_rumor": False})
@@ -190,17 +195,20 @@ def test_media_attached_only_after_media_clean(pg_engine):
             s.commit()
             return pub.id
 
-    # media not verified -> text only
-    poster1 = RecordingPoster()
-    pid_unverified = _seed_with_media(media_clean=False)
-    _publisher(sf, poster1).publish_one(pid_unverified)
-    assert poster1.calls[0][0] == "sendMessage"
+    # reuse clean but no vision verdict -> text only
+    p1 = RecordingPoster()
+    _publisher(sf, p1).publish_one(_seed_with_media(reuse_ok=True, vision_ok=False))
+    assert p1.calls[0][0] == "sendMessage"
 
-    # media verified clean -> photo with caption
-    poster2 = RecordingPoster()
-    pid_clean = _seed_with_media(media_clean=True)
-    _publisher(sf, poster2).publish_one(pid_clean)
-    assert poster2.calls[0][0] == "sendPhoto" and poster2.calls[0][1]["photo"] == "http://x/pic.jpg"
+    # vision ok but reuse not checked -> text only
+    p2 = RecordingPoster()
+    _publisher(sf, p2).publish_one(_seed_with_media(reuse_ok=False, vision_ok=True))
+    assert p2.calls[0][0] == "sendMessage"
+
+    # both clean -> photo with caption
+    p3 = RecordingPoster()
+    _publisher(sf, p3).publish_one(_seed_with_media(reuse_ok=True, vision_ok=True))
+    assert p3.calls[0][0] == "sendPhoto" and p3.calls[0][1]["photo"] == "http://x/pic.jpg"
 
 
 def test_block_decision_not_duplicated_on_repeat(pg_engine):
