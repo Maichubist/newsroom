@@ -27,6 +27,13 @@ from newsroom.analyze.stoplist import (
     load_stoplist,
     worst_action,
 )
+from newsroom.analyze.clustering import (
+    AssignResult,
+    EventClusterer,
+    best_match,
+    cosine,
+    update_centroid,
+)
 
 __all__ = [
     "SourceItem", "group_materials", "independent_source_count",
@@ -35,4 +42,5 @@ __all__ = [
     "classify_noise", "ipso_markers",
     "StopRule", "Violation", "StopListConfigError", "load_stoplist", "check",
     "is_blocked", "worst_action",
+    "EventClusterer", "AssignResult", "cosine", "update_centroid", "best_match",
 ]
