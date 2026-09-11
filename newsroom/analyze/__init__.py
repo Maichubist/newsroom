@@ -40,6 +40,12 @@ from newsroom.analyze.verify import (
     VerifyResult,
     Verifier,
 )
+from newsroom.analyze.stories import (
+    StoryAssignResult,
+    StoryLinker,
+    mark_dormant,
+    slugify,
+)
 
 __all__ = [
     "SourceItem", "group_materials", "independent_source_count",
@@ -50,4 +56,5 @@ __all__ = [
     "is_blocked", "worst_action",
     "EventClusterer", "AssignResult", "cosine", "update_centroid", "best_match",
     "Verifier", "Classifier", "Classification", "VerifyResult",
+    "StoryLinker", "StoryAssignResult", "mark_dormant", "slugify",
 ]
