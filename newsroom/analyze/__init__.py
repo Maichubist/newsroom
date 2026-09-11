@@ -18,10 +18,21 @@ from newsroom.analyze.signal import (
     ipso_markers,
     load_filters,
 )
+from newsroom.analyze.stoplist import (
+    StopListConfigError,
+    StopRule,
+    Violation,
+    check,
+    is_blocked,
+    load_stoplist,
+    worst_action,
+)
 
 __all__ = [
     "SourceItem", "group_materials", "independent_source_count",
     "RiskMatrix", "GateDecision", "RiskConfigError", "load_risk_matrix", "decide",
     "FiltersConfig", "FilterConfigError", "NoiseVerdict", "load_filters",
     "classify_noise", "ipso_markers",
+    "StopRule", "Violation", "StopListConfigError", "load_stoplist", "check",
+    "is_blocked", "worst_action",
 ]
