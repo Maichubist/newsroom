@@ -46,6 +46,12 @@ from newsroom.analyze.stories import (
     mark_dormant,
     slugify,
 )
+from newsroom.analyze.ai_accent import (
+    AccentHit,
+    AiAccentConfigError,
+    check_ai_accent,
+    load_ai_accent,
+)
 
 __all__ = [
     "SourceItem", "group_materials", "independent_source_count",
@@ -57,4 +63,5 @@ __all__ = [
     "EventClusterer", "AssignResult", "cosine", "update_centroid", "best_match",
     "Verifier", "Classifier", "Classification", "VerifyResult",
     "StoryLinker", "StoryAssignResult", "mark_dormant", "slugify",
+    "AccentHit", "AiAccentConfigError", "load_ai_accent", "check_ai_accent",
 ]
