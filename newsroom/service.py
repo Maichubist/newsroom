@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
+from pathlib import Path
 from typing import Callable
 
 from sqlalchemy import select
@@ -22,6 +24,12 @@ from newsroom.logsetup import bind
 from newsroom.models import Source
 
 log = logging.getLogger("newsroom.service")
+
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+
+
+def verify_enabled() -> bool:
+    return os.getenv("VERIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def _utc_now() -> dt.datetime:
@@ -69,6 +77,40 @@ async def poll_rss_forever(session_factory, *, tick_seconds: float = 30.0,
         await asyncio.sleep(tick_seconds)
 
 
+def build_verifier_from_env(session_factory):  # pragma: no cover — needs OpenAI
+    """Assemble a Verifier from env + config (LLM classifier + OpenAI embeddings)."""
+    from newsroom.analyze.classifier import LLMClassifier
+    from newsroom.analyze.embeddings import OpenAIEmbedder
+    from newsroom.analyze.risk import load_risk_matrix
+    from newsroom.analyze.signal import load_filters
+    from newsroom.analyze.stoplist import load_stoplist
+    from newsroom.analyze.verify import Verifier
+
+    return Verifier(
+        session_factory,
+        classifier=LLMClassifier(),
+        embedder=OpenAIEmbedder(),
+        risk_matrix=load_risk_matrix(CONFIG_DIR / "risk.yaml"),
+        filters=load_filters(CONFIG_DIR / "filters.yaml"),
+        stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
+    )
+
+
+async def verify_forever(session_factory, verifier, *, tick_seconds: float = 20.0,
+                         stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Run the verification pass over `new` items until stopped. Nothing published."""
+    from newsroom.analyze.verify import verify_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(verify_pending, session_factory, verifier)
+            if stats.get("processed"):
+                log.info("verify tick", extra=bind(**stats))
+        except Exception:
+            log.exception("verify tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def run_service() -> None:  # pragma: no cover — process entrypoint
     """`python -m newsroom.service` — the collect-only daemon."""
     from dotenv import load_dotenv
@@ -96,6 +138,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("telegram collection enabled")
     else:
         log.info("telegram collection disabled (COLLECTOR_TELEGRAM_ENABLED off)")
+
+    if verify_enabled():
+        verifier = build_verifier_from_env(session_factory)
+        tasks.append(asyncio.create_task(verify_forever(session_factory, verifier)))
+        log.info("verification enabled")
+    else:
+        log.info("verification disabled (VERIFY_ENABLED off)")
 
     await asyncio.gather(*tasks)
 

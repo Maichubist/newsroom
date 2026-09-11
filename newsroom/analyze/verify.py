@@ -208,3 +208,29 @@ class Verifier:
                 charter_version=self.charter_version, model=model,
             ))
             s.commit()
+
+
+def verify_pending(session_factory, verifier: Verifier, *, limit: int = 50) -> dict[str, int]:
+    """One verification tick: take a batch of `new` items and run each through the
+    verifier. Uses SELECT … FOR UPDATE SKIP LOCKED so parallel workers don't grab
+    the same rows (architecture §4). verify_item moves each item off `new`, so the
+    next tick sees fresh items."""
+    from sqlalchemy import select
+
+    from newsroom.models import Item
+
+    with session_factory() as s:
+        ids = list(s.execute(
+            select(Item.id)
+            .where(Item.status == "new")
+            .order_by(Item.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).scalars().all())
+
+    stats: dict[str, int] = {"processed": 0}
+    for item_id in ids:
+        result = verifier.verify_item(item_id)
+        stats["processed"] += 1
+        stats[result.item_status] = stats.get(result.item_status, 0) + 1
+    return stats
