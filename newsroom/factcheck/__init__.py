@@ -19,6 +19,12 @@ from newsroom.factcheck.verdict import (
     apply_verdict,
     parse_verdict,
 )
+from newsroom.factcheck.pipeline import (
+    CHECKABLE_STATUSES,
+    FactChecker,
+    FactCheckResult,
+    check_pending,
+)
 
 __all__ = [
     # claims (§9 step 1)
@@ -28,4 +34,6 @@ __all__ = [
     "select_corpus_evidence", "store_evidence",
     # verdict (§9 step 6)
     "VerdictResult", "VerdictJudge", "LLMVerdictJudge", "parse_verdict", "apply_verdict",
+    # orchestration
+    "FactChecker", "FactCheckResult", "check_pending", "CHECKABLE_STATUSES",
 ]
