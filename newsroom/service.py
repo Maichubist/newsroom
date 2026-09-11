@@ -48,8 +48,16 @@ def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def media_download_enabled() -> bool:
+    return os.getenv("MEDIA_DOWNLOAD_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def media_check_enabled() -> bool:
     return os.getenv("MEDIA_CHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def media_moderation_enabled() -> bool:
+    return os.getenv("MEDIA_MODERATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def reputation_enabled() -> bool:
@@ -289,10 +297,32 @@ async def publish_forever(session_factory, publisher, *, tick_seconds: float = 2
         await asyncio.sleep(tick_seconds)
 
 
+def build_media_downloader_from_env(session_factory):  # pragma: no cover — Pillow/network
+    """Assemble the media downloader: local store + Pillow decoder + HTTP fetch."""
+    from newsroom.media import LocalMediaStore, MediaDownloader, PillowDecoder
+
+    store_dir = os.getenv("MEDIA_STORE_DIR", "./media")
+    return MediaDownloader(session_factory, store=LocalMediaStore(store_dir), decoder=PillowDecoder())
+
+
+async def media_download_forever(session_factory, downloader, *, tick_seconds: float = 45.0,
+                                 stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Download media for filter-passed items and compute pHashes, feeding the
+    reuse check. Nothing is published."""
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(downloader.download_pending)
+            if stats.get("stored"):
+                log.info("media-download tick", extra=bind(**stats))
+        except Exception:
+            log.exception("media-download tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def media_check_forever(session_factory, *, tick_seconds: float = 60.0,
                               stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Check publishable events' media for recycled images (pHash). DB-only, no
-    LLM; dormant until media is downloaded (stage 1г). Nothing is published."""
+    LLM; dormant until media is downloaded. Nothing is published."""
     from newsroom.factcheck import MediaChecker, check_media_pending
 
     checker = MediaChecker(session_factory)
@@ -303,6 +333,28 @@ async def media_check_forever(session_factory, *, tick_seconds: float = 60.0,
                 log.info("media-check tick", extra=bind(**stats))
         except Exception:
             log.exception("media-check tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+def build_image_moderator_from_env():  # pragma: no cover — OpenAI vision
+    from newsroom.media import OpenAIImageModerator
+
+    return OpenAIImageModerator()
+
+
+async def media_moderation_forever(session_factory, moderator, *, tick_seconds: float = 60.0,
+                                   stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Moderate downloaded images (the media stop-list) so verified media can
+    attach to posts. Nothing is published."""
+    from newsroom.media import moderate_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(moderate_pending, session_factory, moderator)
+            if stats.get("events"):
+                log.info("media-moderation tick", extra=bind(**stats))
+        except Exception:
+            log.exception("media-moderation tick failed")
         await asyncio.sleep(tick_seconds)
 
 
@@ -373,6 +425,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("verification disabled (VERIFY_ENABLED off)")
 
+    if media_download_enabled():
+        downloader = build_media_downloader_from_env(session_factory)
+        tasks.append(asyncio.create_task(media_download_forever(session_factory, downloader)))
+        log.info("media download enabled")
+    else:
+        log.info("media download disabled (MEDIA_DOWNLOAD_ENABLED off)")
+
     if factbase_enabled():
         builder = build_factbase_builder_from_env(session_factory)
         tasks.append(asyncio.create_task(factbase_forever(session_factory, builder)))
@@ -392,6 +451,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("media check enabled")
     else:
         log.info("media check disabled (MEDIA_CHECK_ENABLED off)")
+
+    if media_moderation_enabled():
+        moderator = build_image_moderator_from_env()
+        tasks.append(asyncio.create_task(media_moderation_forever(session_factory, moderator)))
+        log.info("media moderation enabled")
+    else:
+        log.info("media moderation disabled (MEDIA_MODERATION_ENABLED off)")
 
     if story_updates_enabled():
         updater = build_story_updater_from_env(session_factory)
