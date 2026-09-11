@@ -258,6 +258,35 @@ async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 
         await asyncio.sleep(tick_seconds)
 
 
+def build_publisher_from_env(session_factory):
+    """Assemble the Publisher: Telegram adapter (PUBLISH_ENABLED + credentials) +
+    stop-list + limits. No OpenAI — publishing is DB + Telegram only."""
+    from newsroom.analyze.stoplist import load_stoplist
+    from newsroom.publishers import Publisher, TelegramPublisher, load_limits
+
+    return Publisher(
+        session_factory,
+        telegram=TelegramPublisher.from_env(),
+        stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
+        limits=load_limits(CONFIG_DIR / "limits.yaml"),
+    )
+
+
+async def publish_forever(session_factory, publisher, *, tick_seconds: float = 20.0,
+                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Publish critic-passed drafts that clear the gate. The Publisher no-ops when
+    the master switch is off; each draft still passes the stop button, stop-list,
+    limits and surge check before anything is sent."""
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(publisher.publish_pending)
+            if stats.get("published") or stats.get("blocked"):
+                log.info("publish tick", extra=bind(**stats))
+        except Exception:
+            log.exception("publish tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def media_check_forever(session_factory, *, tick_seconds: float = 60.0,
                               stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Check publishable events' media for recycled images (pHash). DB-only, no
@@ -375,6 +404,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("editorial drafting enabled")
     else:
         log.info("editorial drafting disabled (EDITORIAL_ENABLED off)")
+
+    publisher = build_publisher_from_env(session_factory)
+    if publisher.telegram.is_enabled():
+        tasks.append(asyncio.create_task(publish_forever(session_factory, publisher)))
+        log.info("publishing enabled")
+    else:
+        log.info("publishing disabled (PUBLISH_ENABLED off or no credentials)")
 
     if reputation_enabled():
         tasks.append(asyncio.create_task(reputation_forever(session_factory)))
