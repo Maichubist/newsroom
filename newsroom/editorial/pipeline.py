@@ -124,6 +124,31 @@ class EditorialPipeline:
         return pub_id
 
 
+def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25) -> dict[str, int]:
+    """One editorial tick: draft posts for publishable events that don't have a
+    publication yet. Once produced, the event has a publications row and is skipped
+    next tick. Nothing is published."""
+    from sqlalchemy import select
+
+    from newsroom.models import Event, Publication
+
+    with session_factory() as s:
+        have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
+        ids = list(s.execute(
+            select(Event.id)
+            .where(Event.status.in_(("reported", "confirmed", "rumor")), Event.id.not_in(have_pub))
+            .order_by(Event.id)
+            .limit(limit)
+        ).scalars().all())
+
+    stats = {"produced": 0, "ok": 0, "flagged": 0}
+    for event_id in ids:
+        result = pipeline.produce(event_id)
+        stats["produced"] += 1
+        stats["ok" if result.critic_ok else "flagged"] += 1
+    return stats
+
+
 def _hashtags(rubric: str | None, story_hashtag: str | None) -> list[str]:
     tags: list[str] = []
     if rubric:

@@ -32,6 +32,10 @@ def verify_enabled() -> bool:
     return os.getenv("VERIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def editorial_enabled() -> bool:
+    return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -111,6 +115,35 @@ async def verify_forever(session_factory, verifier, *, tick_seconds: float = 20.
         await asyncio.sleep(tick_seconds)
 
 
+def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — needs OpenAI
+    """Assemble the editorial pipeline (LLM generator + charter configs)."""
+    from newsroom.analyze.ai_accent import load_ai_accent
+    from newsroom.analyze.stoplist import load_stoplist
+    from newsroom.editorial import EditorialPipeline, LLMGenerator
+
+    return EditorialPipeline(
+        session_factory,
+        generator=LLMGenerator(),
+        stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
+        ai_accent_patterns=load_ai_accent(CONFIG_DIR / "ai_accent.yaml"),
+    )
+
+
+async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 30.0,
+                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Draft posts for publishable events until stopped. Nothing is published."""
+    from newsroom.editorial import produce_drafts
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(produce_drafts, session_factory, pipeline)
+            if stats.get("produced"):
+                log.info("editorial tick", extra=bind(**stats))
+        except Exception:
+            log.exception("editorial tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def run_service() -> None:  # pragma: no cover — process entrypoint
     """`python -m newsroom.service` — the collect-only daemon."""
     from dotenv import load_dotenv
@@ -145,6 +178,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("verification enabled")
     else:
         log.info("verification disabled (VERIFY_ENABLED off)")
+
+    if editorial_enabled():
+        pipeline = build_editorial_pipeline_from_env(session_factory)
+        tasks.append(asyncio.create_task(editorial_forever(session_factory, pipeline)))
+        log.info("editorial drafting enabled")
+    else:
+        log.info("editorial drafting disabled (EDITORIAL_ENABLED off)")
 
     await asyncio.gather(*tasks)
 
