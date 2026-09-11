@@ -39,6 +39,49 @@ def _event(pg_engine, *, status: str, title: str, update_type: str | None = None
         return eid
 
 
+class RecordingGenerator:
+    model = "rec-gen"
+
+    def __init__(self):
+        self.contexts = []
+
+    def generate(self, ctx, *, feedback=None):
+        self.contexts.append(ctx)
+        return DraftContent(headline=ctx.title or "Новина", lead="Суть.", what_it_means="Наслідок.")
+
+
+def test_produce_feeds_fact_base_and_source_into_generator(pg_engine):
+    from newsroom.editorial import EditorialPipeline
+    from newsroom.models import Event, EventItem, Item, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://g/feed", name="G", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="g1", content_hash="g1", title="НБУ знизив ставку",
+                  text="Нацбанк знизив облікову ставку до 13% на засіданні 6 вересня.")
+        s.add(it)
+        s.flush()
+        ev = Event(status="confirmed", rubric="economy", title="НБУ знизив ставку",
+                   first_seen_at=dt.datetime.now(dt.timezone.utc),
+                   fact_base={"facts": [{"text": "Ставка знижена до 13%", "confirmed_by": 2,
+                                         "divergent": False}], "reactions": []})
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.commit()
+        event_id = ev.id
+
+    gen = RecordingGenerator()
+    pipe = EditorialPipeline(sf, generator=gen, stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    pipe.produce(event_id)
+
+    ctx = gen.contexts[0]
+    assert "Ставка знижена до 13%" in ctx.facts
+    assert "13%" in ctx.source_excerpt and "6 вересня" in ctx.source_excerpt
+
+
 def test_produce_drafts_only_publishable_and_idempotent(pg_engine):
     sf = make_session_factory(pg_engine)
     e_conf = _event(pg_engine, status="confirmed", title="Підтверджена подія")

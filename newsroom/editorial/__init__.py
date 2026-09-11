@@ -5,6 +5,7 @@ from newsroom.editorial.generator import (
     GenerationContext,
     Generator,
     LLMGenerator,
+    build_material,
 )
 from newsroom.editorial.pipeline import EditorialPipeline, ProduceResult, produce_drafts
 from newsroom.editorial.updates import (
@@ -24,7 +25,7 @@ from newsroom.editorial.updates import (
 __all__ = [
     "DraftContent", "compose_post", "parse_draft",
     "CriticReport", "critic_check",
-    "Generator", "GenerationContext", "LLMGenerator", "DEFAULT_PROMPT",
+    "Generator", "GenerationContext", "LLMGenerator", "DEFAULT_PROMPT", "build_material",
     "EditorialPipeline", "ProduceResult", "produce_drafts",
     # story updates (§7, §8.5)
     "UpdateDecision", "UpdateResult", "UpdateClassifier", "LLMUpdateClassifier",

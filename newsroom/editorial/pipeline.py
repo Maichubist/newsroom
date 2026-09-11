@@ -65,9 +65,12 @@ class EditorialPipeline:
                 .distinct()
             ).scalars().all())
             title = event.title or ""
+            facts = _facts_from_base(event.fact_base)
+            source_excerpt = _source_excerpt(s, event_id)
 
         is_rumor = status == "rumor"
-        ctx = GenerationContext(title=title, summary=summary, rubrics=rubrics, status=status)
+        ctx = GenerationContext(title=title, summary=summary, rubrics=rubrics, status=status,
+                                facts=facts, source_excerpt=source_excerpt)
 
         draft = self.generator.generate(ctx)
         post, report = self._compose_and_check(draft, status, is_rumor, hashtags, sources)
@@ -156,6 +159,43 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
         stats["produced"] += 1
         stats["ok" if result.critic_ok else "flagged"] += 1
     return stats
+
+
+def _facts_from_base(fact_base, *, limit: int = 12) -> list[str]:
+    """Pull the shared facts out of events.fact_base for the generator, confirmed
+    facts first, marking where sources disagree on numbers (§8)."""
+    if not isinstance(fact_base, dict):
+        return []
+    rows = [f for f in (fact_base.get("facts") or []) if isinstance(f, dict) and f.get("text")]
+    rows.sort(key=lambda f: int(f.get("confirmed_by") or 0), reverse=True)
+    out: list[str] = []
+    for f in rows[:limit]:
+        text = str(f["text"]).strip()
+        if f.get("divergent"):
+            text += " (джерела розходяться в цифрах)"
+        out.append(text)
+    return out
+
+
+def _source_excerpt(s, event_id: int, *, max_chars: int = 2000) -> str:
+    """A trimmed concatenation of the event's source material, so the generator has
+    concrete detail to write from when the fact base is thin."""
+    from sqlalchemy import select
+
+    from newsroom.models import EventItem, Item
+
+    rows = s.execute(
+        select(Item.title, Item.text)
+        .join(EventItem, EventItem.item_id == Item.id)
+        .where(EventItem.event_id == event_id)
+        .limit(6)
+    ).all()
+    chunks: list[str] = []
+    for title, text in rows:
+        piece = f"{(title or '').strip()}\n{(text or '').strip()}".strip()
+        if piece:
+            chunks.append(piece)
+    return "\n\n".join(chunks)[:max_chars].strip()
 
 
 def _hashtags(rubric: str | None, story_hashtag: str | None) -> list[str]:
