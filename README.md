@@ -51,7 +51,11 @@ pytest -m "not pg"     # лише офлайн-логіка, без Docker
 | M7a collect-only runner (`python -m newsroom.runner`) | ✅ |
 | M6 Telegram-збирач: логіка (маппер, альбоми, forwarded_from, edits/deletes, backfill, FloodWait) + тести | ✅ |
 | M7b жива петля: RSS-планувальник за `poll_interval` + оркестрація Telegram-збирача (backfill/handlers/album flush) + тести; демон `python -m newsroom.service` | ✅ |
-| M7c перенос Telegram-паблішера з news_bot (gated) | ⏳ |
+| M7c gated Telegram Bot API-паблішер (`newsroom/publishers/telegram.py`) + тести | ✅ |
+
+**Фундамент 1а завершено.** Паблішер під'єднаний, але за майстер-вимикачем
+`PUBLISH_ENABLED` (off = нічого не публікується); нічого його поки не викликає —
+канальний адаптер (подія → публікація) і каскад медіа video→image→text це етап 1г.
 
 M6/M7b постачають усю **логіку** збору (RSS due-планувальник, Telegram backfill,
 realtime-хендлери, склейка альбомів, FloodWait) — тестовано на фейкових клієнтах,
