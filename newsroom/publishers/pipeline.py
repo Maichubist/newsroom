@@ -104,15 +104,6 @@ class Publisher:
             .where(Publication.status == "published", Publication.published_at >= now - dt.timedelta(days=1),
                    _Event.status == "rumor")
         ) or 0)
-        # when the last normal post went out, for pacing: neither critical (own
-        # urgent limit) nor rumor (own daily limit) count as a normal post
-        last_regular_at = s.scalar(
-            select(func.max(Publication.published_at)).select_from(Publication)
-            .join(_Event, _Event.id == Publication.event_id)
-            .where(Publication.status == "published",
-                   _Event.risk_level.is_distinct_from("critical"), _Event.status != "rumor")
-        )
-        seconds_since_last_regular = (now - last_regular_at).total_seconds() if last_regular_at else None
         surge_same_rubric = 0
         if rubric:
             surge_same_rubric = int(s.scalar(
@@ -133,7 +124,6 @@ class Publisher:
             urgent_last_hour=urgent_last_hour,
             rumors_last_day=rumors_last_day,
             surge_same_rubric=surge_same_rubric,
-            seconds_since_last_regular=seconds_since_last_regular,
         )
 
     def publish_one(self, publication_id: int) -> PublishOutcome:

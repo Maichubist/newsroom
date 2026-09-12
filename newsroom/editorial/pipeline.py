@@ -173,7 +173,8 @@ class EditorialPipeline:
 
 def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25,
                    classify_grace_seconds: float = 180.0,
-                   significance_threshold: float | None = None) -> dict[str, int]:
+                   significance_threshold: float | None = None,
+                   require_curation: bool = False) -> dict[str, int]:
     """One editorial tick: draft posts for publishable events that don't have a
     publication yet. Events the story-update step classified as summary-only
     (confirmation / reaction / minor) are skipped — they only update the story
@@ -213,6 +214,10 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
             Event.significance >= significance_threshold,
             and_(Event.significance.is_(None), or_(Event.story_id.is_(None), Event.updated_at < cutoff)),
         ))
+    if require_curation:
+        # only draft events the editorial curation marked publish — count follows the
+        # news, not a rate (must-publish events are marked publish deterministically)
+        conditions.append(Event.curated == "publish")
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))

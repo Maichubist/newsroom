@@ -156,6 +156,27 @@ def test_significance_threshold_skips_low_events(pg_engine):
         assert high_id in drafted and low_id not in drafted
 
 
+def test_require_curation_drafts_only_publish_marked(pg_engine):
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        pub = Event(status="confirmed", rubric="politics", title="Схвалено курацією",
+                    curated="publish", first_seen_at=now)
+        hold = Event(status="confirmed", rubric="politics", title="Притримано", curated="hold", first_seen_at=now)
+        unrev = Event(status="confirmed", rubric="politics", title="Не переглянуто", curated=None, first_seen_at=now)
+        s.add_all([pub, hold, unrev])
+        s.flush()
+        pub_id, hold_id, unrev_id = pub.id, hold.id, unrev.id
+        s.commit()
+
+    pipe = EditorialPipeline(sf, generator=FakeGenerator(), stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    produce_drafts(sf, pipe, limit=50, require_curation=True)
+
+    with Session(pg_engine) as s:
+        drafted = set(s.execute(select(Publication.event_id)).scalars().all())
+        assert drafted == {pub_id}        # only the publish-marked event is drafted
+
+
 def test_produce_drafts_skips_summary_only_update_types(pg_engine):
     sf = make_session_factory(pg_engine)
     e_new = _event(pg_engine, status="confirmed", title="Новий факт", update_type="new_fact")

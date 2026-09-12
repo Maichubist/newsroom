@@ -16,10 +16,7 @@ pytestmark = pytest.mark.pg
 UTC = dt.timezone.utc
 CONFIG = Path(__file__).resolve().parents[1] / "config"
 STOP = load_stoplist(CONFIG / "stoplist.yaml")
-# regular_per_hour=0 disables pacing for the shared publisher, so tests that publish
-# several posts in quick succession aren't held; the pacing test sets its own limit.
-LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30,
-                surge_max_same_rubric=5, regular_per_hour=0)
+LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30, surge_max_same_rubric=5)
 
 
 class RecordingPoster:
@@ -246,19 +243,16 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
     assert p3.calls[0][0] == "sendPhoto" and p3.calls[0][1]["photo"] == "http://x/pic.jpg"
 
 
-def test_publish_paces_regular_and_prefers_significant(pg_engine):
+def test_publish_prefers_significant_order(pg_engine):
+    # no rate cap: all curated drafts publish, but in significance order (highest first)
     from newsroom.db import make_session_factory
     from newsroom.models import Event, Publication
-    from newsroom.publishers.gate import Limits
 
     sf = make_session_factory(pg_engine)
     poster = RecordingPoster()
-    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
-    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=Limits(regular_per_hour=8))
-
     made = {}
     with Session(pg_engine) as s:
-        for sig in (0.30, 0.90, 0.70):        # inserted out of order; publishing must sort by significance
+        for sig in (0.30, 0.90, 0.70):        # inserted out of order
             ev = Event(status="confirmed", risk_level="low", rubric="economy", title=f"e{sig}",
                        significance=sig, first_seen_at=dt.datetime.now(UTC))
             s.add(ev)
@@ -271,14 +265,14 @@ def test_publish_paces_regular_and_prefers_significant(pg_engine):
             made[sig] = pub.id
         s.commit()
 
-    # one run: the first normal post publishes (the most significant), the rest are
-    # paced to the next slots — so exactly one goes out, and it's the top by significance
-    stats = publisher.publish_pending(limit=50)
-    assert stats["published"] == 1 and stats["blocked"] == 2
+    stats = _publisher(sf, poster).publish_pending(limit=50)
+    assert stats["published"] == 3            # all publish — count is set by curation upstream, not a rate
     with Session(pg_engine) as s:
-        assert s.get(Publication, made[0.90]).status == "published"   # highest significance chosen
-        assert s.get(Publication, made[0.70]).status == "draft"       # paced to a later slot
-        assert s.get(Publication, made[0.30]).status == "draft"
+        for pid in made.values():
+            assert s.get(Publication, pid).status == "published"
+    # the highest-significance post was sent first
+    first_headline = poster.calls[0][1]["text"].splitlines()[0]
+    assert "0.9" in first_headline
 
 
 def test_story_second_post_replies_to_first(pg_engine):

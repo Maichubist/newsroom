@@ -62,6 +62,7 @@ class Event(Base):
     update_type: Mapped[str | None] = mapped_column(String(24), nullable=True)  # new_fact|confirmation|refutation|reaction|consequence|minor
 
     significance: Mapped[float | None] = mapped_column(Float, nullable=True)  # T1 gate score (analyze/significance.py)
+    curated: Mapped[str | None] = mapped_column(String(16), nullable=True)  # publish|hold — editorial curation (editorial/curation.py)
 
     rumor_deadline_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rumor_outcome: Mapped[str | None] = mapped_column(String(24), nullable=True)

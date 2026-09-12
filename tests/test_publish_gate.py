@@ -23,7 +23,6 @@ LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30, su
 def test_load_limits_from_config():
     lim = load_limits(CONFIG / "limits.yaml")
     assert lim.urgent_per_hour >= 1 and lim.rumors_per_day >= 1 and lim.surge_max_same_rubric >= 1
-    assert lim.regular_per_hour >= 1
 
 
 # --- evaluate_gate: happy path ------------------------------------------------
@@ -87,31 +86,11 @@ def test_gate_surge_detection():
     assert "surge" in hit.reasons and not hit.allow
 
 
-def test_gate_regular_post_pacing():
-    # LIMITS.regular_per_hour defaults to 8 -> one normal post per 450s
-    paced = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=100.0), LIMITS)
-    ok = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=500.0), LIMITS)
-    first = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=None), LIMITS)
-    assert "post_pacing" in paced.reasons and not paced.allow
-    assert ok.allow is True                    # enough time has passed
-    assert first.allow is True                 # no prior normal post -> not paced
-
-
-def test_gate_pacing_excludes_urgent_and_rumor():
-    # breaking (critical) news is never paced by the general firehose control
-    urgent = evaluate_gate(GateInputs(critic_ok=True, risk_level="critical",
-                                      has_official_source=True, seconds_since_last_regular=0.0), LIMITS)
-    assert "post_pacing" not in urgent.reasons and urgent.allow is True
-    # a labelled rumor is governed by the rumor limit, not pacing
-    rumor = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", is_rumor=True,
-                                     rumor_labeled=True, seconds_since_last_regular=0.0), LIMITS)
-    assert "post_pacing" not in rumor.reasons
-
-
-def test_gate_pacing_disabled_when_zero():
-    limits = Limits(regular_per_hour=0)
-    d = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=0.0), limits)
-    assert "post_pacing" not in d.reasons
+def test_gate_has_no_rate_pacing():
+    # output volume is decided by editorial curation, not a per-post rate: a clean
+    # low-risk post always passes the gate regardless of how recently we posted
+    for _ in range(20):
+        assert evaluate_gate(GateInputs(critic_ok=True, risk_level="low"), LIMITS).allow is True
 
 
 def test_gate_reasons_are_deduped_and_sorted():

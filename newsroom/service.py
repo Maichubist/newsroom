@@ -56,6 +56,10 @@ def significance_enabled() -> bool:
     return os.getenv("SIGNIFICANCE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def curation_enabled() -> bool:
+    return os.getenv("CURATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -326,11 +330,40 @@ async def significance_forever(session_factory, config, *, tick_seconds: float =
         await asyncio.sleep(tick_seconds)
 
 
+def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
+    """Assemble the LLM editorial ranker (comparative curation)."""
+    from newsroom.editorial import LLMEditorialRanker
+
+    return LLMEditorialRanker()
+
+
+async def curation_forever(session_factory, ranker, *, significance_threshold: float | None = None,
+                           window_hours: int = 6, tick_seconds: float = 120.0,
+                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Mark recent significant events publish/hold (must-publish deterministically,
+    the rest by comparative LLM ranking), before editorial. Only publish-marked
+    events are drafted — the count follows the news, not a fixed rate."""
+    from newsroom.editorial import curate_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(
+                curate_pending, session_factory, ranker,
+                significance_threshold=significance_threshold, window_hours=window_hours)
+            if stats.get("curated"):
+                log.info("curation tick", extra=bind(**stats))
+        except Exception:
+            log.exception("curation tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 30.0,
                             significance_threshold: float | None = None,
+                            require_curation: bool = False,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Draft posts for publishable events until stopped. When a significance
-    threshold is given, events scored below it are skipped (T1 gate). Nothing is
+    threshold is given, events scored below it are skipped (T1 gate); with
+    require_curation, only events the curation marked publish are drafted. Nothing is
     published."""
     from newsroom.editorial import produce_drafts
 
@@ -338,7 +371,8 @@ async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 
         try:
             stats = await asyncio.to_thread(
                 produce_drafts, session_factory, pipeline,
-                significance_threshold=significance_threshold)
+                significance_threshold=significance_threshold,
+                require_curation=require_curation)
             if stats.get("produced"):
                 log.info("editorial tick", extra=bind(**stats))
         except Exception:
@@ -643,11 +677,20 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
 
+    if curation_enabled():
+        ranker = build_editorial_ranker_from_env()
+        tasks.append(asyncio.create_task(curation_forever(
+            session_factory, ranker, significance_threshold=significance_threshold)))
+        log.info("editorial curation enabled")
+    else:
+        log.info("editorial curation disabled (CURATION_ENABLED off)")
+
     if editorial_enabled():
         pipeline = build_editorial_pipeline_from_env(session_factory)
         tasks.append(asyncio.create_task(editorial_forever(
-            session_factory, pipeline, significance_threshold=significance_threshold)))
-        log.info("editorial drafting enabled")
+            session_factory, pipeline, significance_threshold=significance_threshold,
+            require_curation=curation_enabled())))
+        log.info("editorial drafting enabled", extra=bind(require_curation=curation_enabled()))
     else:
         log.info("editorial drafting disabled (EDITORIAL_ENABLED off)")
 

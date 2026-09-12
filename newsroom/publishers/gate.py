@@ -35,7 +35,6 @@ class Limits:
     rumors_per_day: int = 8
     surge_window_minutes: int = 30
     surge_max_same_rubric: int = 5
-    regular_per_hour: int = 8          # normal posts/hour, paced evenly (0 = no pacing)
 
 
 def load_limits(path: str | Path) -> Limits:
@@ -49,7 +48,6 @@ def load_limits(path: str | Path) -> Limits:
             rumors_per_day=int(data.get("rumors_per_day", 8)),
             surge_window_minutes=int(data.get("surge_window_minutes", 30)),
             surge_max_same_rubric=int(data.get("surge_max_same_rubric", 5)),
-            regular_per_hour=int(data.get("regular_per_hour", 8)),
         )
     except (TypeError, ValueError) as exc:
         raise LimitsConfigError(f"bad limits value: {exc}") from exc
@@ -67,7 +65,6 @@ class GateInputs:
     urgent_last_hour: int = 0
     rumors_last_day: int = 0
     surge_same_rubric: int = 0
-    seconds_since_last_regular: float | None = None  # since the last normal post (None = none yet)
 
 
 @dataclass(frozen=True)
@@ -102,16 +99,6 @@ def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
         reasons.append("urgent_rate_limit")
     if inputs.is_rumor and inputs.rumors_last_day >= limits.rumors_per_day:
         reasons.append("rumor_rate_limit")
-    # general firehose control: PACE normal posts evenly across the hour instead of
-    # publishing the first N then stopping. One normal post per (3600 / regular_per_hour)
-    # seconds; because publishing is ordered by significance, each freed slot takes the
-    # most-significant pending draft, so important news arriving later still gets the
-    # next slot rather than being locked out. Urgent/critical and rumors are never
-    # paced here (they have their own limits), so breaking news is never held by it.
-    regular = not critical and not inputs.is_rumor
-    if (regular and limits.regular_per_hour > 0 and inputs.seconds_since_last_regular is not None
-            and inputs.seconds_since_last_regular < 3600.0 / limits.regular_per_hour):
-        reasons.append("post_pacing")
 
     # --- surge / possible attack (hold) ---
     if inputs.surge_same_rubric >= limits.surge_max_same_rubric:

@@ -7,6 +7,16 @@ from newsroom.editorial.generator import (
     LLMGenerator,
     build_material,
 )
+from newsroom.editorial.curation import (
+    CURATE_HOLD,
+    CURATE_PUBLISH,
+    Candidate,
+    EditorialRanker,
+    LLMEditorialRanker,
+    curate_pending,
+    must_publish,
+    parse_ranking,
+)
 from newsroom.editorial.pipeline import EditorialPipeline, ProduceResult, produce_drafts
 from newsroom.editorial.updates import (
     ROUTE_POST,
@@ -27,6 +37,9 @@ __all__ = [
     "CriticReport", "critic_check",
     "Generator", "GenerationContext", "LLMGenerator", "DEFAULT_PROMPT", "build_material",
     "EditorialPipeline", "ProduceResult", "produce_drafts",
+    # editorial curation (§: publish by merit, not by rate)
+    "Candidate", "EditorialRanker", "LLMEditorialRanker", "curate_pending",
+    "must_publish", "parse_ranking", "CURATE_PUBLISH", "CURATE_HOLD",
     # story updates (§7, §8.5)
     "UpdateDecision", "UpdateResult", "UpdateClassifier", "LLMUpdateClassifier",
     "StoryUpdater", "classify_pending", "parse_update", "route_update",

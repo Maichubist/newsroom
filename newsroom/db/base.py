@@ -40,6 +40,7 @@ def make_session_factory(engine: Engine) -> sessionmaker:
 # migrations, nothing dropped or renamed).
 _ADDITIVE_COLUMNS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS significance double precision",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS curated varchar(16)",
 )
 
 
