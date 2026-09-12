@@ -65,3 +65,26 @@ class ChannelMetric(Base):
     channel: Mapped[str] = mapped_column(String(16), index=True)
     measured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     subscribers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ItemMetric(Base):
+    """Engagement snapshot for a SOURCE post over time (demand intelligence). Mirrors
+    PublicationMetric but for other channels' items — how the ecosystem reacts."""
+    __tablename__ = "item_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
+    measured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reactions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    forwards: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class SourceMetric(Base):
+    """Subscriber-count snapshot for a source, for normalising engagement by reach."""
+    __tablename__ = "source_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    measured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    subscribers: Mapped[int | None] = mapped_column(Integer, nullable=True)

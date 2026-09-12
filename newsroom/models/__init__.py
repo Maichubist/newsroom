@@ -23,8 +23,10 @@ from newsroom.models.analytical import (
 )
 from newsroom.models.publication import (
     ChannelMetric,
+    ItemMetric,
     Publication,
     PublicationMetric,
+    SourceMetric,
 )
 from newsroom.models.service import Decision, ReputationEvent, SystemState
 
@@ -34,7 +36,7 @@ __all__ = [
     # analytical
     "Event", "EventItem", "Story", "StoryVersion", "Claim", "ClaimEvidence",
     # publication
-    "Publication", "PublicationMetric", "ChannelMetric",
+    "Publication", "PublicationMetric", "ChannelMetric", "ItemMetric", "SourceMetric",
     # service
     "ReputationEvent", "Decision", "SystemState",
 ]

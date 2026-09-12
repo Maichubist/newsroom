@@ -88,6 +88,10 @@ def monitoring_enabled() -> bool:
     return os.getenv("MONITORING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def demand_metrics_enabled() -> bool:
+    return os.getenv("DEMAND_METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def metrics_enabled() -> bool:
     return os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -527,6 +531,30 @@ async def monitoring_forever(session_factory, *, tick_seconds: float = 120.0,
         await asyncio.sleep(tick_seconds)
 
 
+async def demand_forever(session_factory, collector, *, tick_seconds: float = 1800.0,
+                         sources_every: int = 4, stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Snapshot engagement of monitored source posts + channel sizes via the shared
+    Telethon session, so demand data accumulates. Slow cadence (engagement changes
+    slowly); subscriber counts even slower. Reads only — nothing is published."""
+    from newsroom.analyze.demand import DemandCollector, TelethonDemandSource
+
+    loop = asyncio.get_running_loop()
+    client = await collector.wait_client()
+    demand = DemandCollector(session_factory, TelethonDemandSource(client, loop))
+    ticks = 0
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(demand.collect_items)
+            if ticks % sources_every == 0:
+                await asyncio.to_thread(demand.collect_sources)
+            if stats.get("recorded"):
+                log.info("demand tick", extra=bind(**stats))
+        except Exception:
+            log.exception("demand tick failed")
+        ticks += 1
+        await asyncio.sleep(tick_seconds)
+
+
 async def metrics_forever(session_factory, collector, channel_chat_id, *,
                           tick_seconds: float = 600.0, channel_every: int = 6,
                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
@@ -729,6 +757,15 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
             log.info("metrics disabled (needs telegram collection + a publish channel)")
     else:
         log.info("metrics disabled (METRICS_ENABLED off)")
+
+    if demand_metrics_enabled():
+        if telegram_collector is not None:
+            tasks.append(asyncio.create_task(demand_forever(session_factory, telegram_collector)))
+            log.info("demand metrics enabled")
+        else:
+            log.info("demand metrics disabled (needs telegram collection)")
+    else:
+        log.info("demand metrics disabled (DEMAND_METRICS_ENABLED off)")
 
     await asyncio.gather(*tasks)
 
