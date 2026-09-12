@@ -76,6 +76,15 @@ sources:
   - {name: "Михайло Драпатий (командувач СВ)", kind: telegram, handle_or_url: "@Drapatyi_KSV", origin: ua, lang: uk, tier: official, is_official: true}
   - {name: "Мінцифри / Михайло Федоров", kind: telegram, handle_or_url: "@zedigital", origin: ua, lang: uk, tier: official, is_official: true}
 
+  # --- Демонд-дзеркало: великі мейнстрім-новинні + агрегатори (аналіз попиту) ---
+  # Дзеркало масової аудиторії для demand-intelligence (докс/demand-intelligence.md):
+  # міряємо їхню залученість, щоб учитися, що цікаво «інформованому масовому» читачу.
+  # Агрегатори (Труха) — tier aggregator: за хартією 3.1 не відкривають gate для
+  # критичних тем самі, і потребують сильнішого дисконту маніпуляцій.
+  - {name: "Українська правда (TG)", kind: telegram, handle_or_url: "@ukrpravda_news", origin: ua, lang: uk, tier: media}
+  - {name: "ТСН (TG)", kind: telegram, handle_or_url: "@TCH_channel", origin: ua, lang: uk, tier: media}
+  - {name: "Труха⚡Україна", kind: telegram, handle_or_url: "@truexanewsua", origin: ua, lang: uk, tier: aggregator}
+
   # --- Telegram channels (auto-imported, then curated) ---
   # Жоден із цих каналів не є офіційним держджерелом (tier: official). Новинні
   # аґреґатори, OSINT-моніторинги і персональні блогери -> aggregator; анонімні

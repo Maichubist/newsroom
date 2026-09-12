@@ -42,8 +42,13 @@ class SignificanceConfig:
     foreign_penalty: float = 0.30
     corroboration_step: float = 0.08
     corroboration_cap: float = 0.16
-    story_bonus: float = 0.12
-    story_min_events: int = 3
+    # Chronic-theme penalty: a long-lived, steady theme (daily drone counts, routine
+    # shelling) is civically important but low-interest for a mass reader — it's
+    # been "буденність" for years. We down-weight the routine Nth event of such a
+    # theme; a genuine burst/escalation (many events in a SHORT span) is not chronic.
+    routine_penalty: float = 0.20
+    routine_min_events: int = 8         # theme with at least this many events...
+    routine_min_days: float = 4.0       # ...spread over at least this many days = chronic
     critical_floor: float = 0.95
     default_weight: float = 0.50
     default_locality_sensitive: bool = True
@@ -78,8 +83,9 @@ def load_significance_config(path: str | Path) -> SignificanceConfig:
             foreign_penalty=float(data.get("foreign_penalty", 0.30)),
             corroboration_step=float(data.get("corroboration_step", 0.08)),
             corroboration_cap=float(data.get("corroboration_cap", 0.16)),
-            story_bonus=float(data.get("story_bonus", 0.12)),
-            story_min_events=int(data.get("story_min_events", 3)),
+            routine_penalty=float(data.get("routine_penalty", 0.20)),
+            routine_min_events=int(data.get("routine_min_events", 8)),
+            routine_min_days=float(data.get("routine_min_days", 4.0)),
             critical_floor=float(data.get("critical_floor", 0.95)),
             default_weight=float(data.get("default_weight", 0.50)),
             default_locality_sensitive=bool(data.get("default_locality_sensitive", True)),
@@ -122,7 +128,7 @@ class SignificanceInputs:
     risk_level: str | None = None
     text: str = ""                       # title + excerpt, for UA-marker detection
     independent_source_count: int = 0
-    story_event_count: int = 0
+    chronic: bool = False                # part of a long-lived, steady (routine) theme
 
 
 @dataclass(frozen=True)
@@ -154,9 +160,9 @@ def significance_score(inp: SignificanceInputs, config: SignificanceConfig) -> S
         score += min(extra_sources * config.corroboration_step, config.corroboration_cap)
         reasons.append("corroborated")
 
-    if inp.story_event_count >= config.story_min_events:
-        score += config.story_bonus
-        reasons.append("developing_story")
+    if inp.chronic:
+        score -= config.routine_penalty
+        reasons.append("routine_theme")
 
     score = max(0.0, min(1.0, score))
 
@@ -165,6 +171,28 @@ def significance_score(inp: SignificanceInputs, config: SignificanceConfig) -> S
         reasons.append("critical_floor")
 
     return ScoreResult(score=score, passes=score >= config.threshold, reasons=reasons)
+
+
+def _is_chronic_story(session, story_id: int | None, config: SignificanceConfig) -> bool:
+    """A theme is chronic (routine, low-interest) when it has many events spread over
+    a long span — steady daily updates, not a fresh burst. A recent burst (many
+    events in a short span) is NOT chronic."""
+    if story_id is None:
+        return False
+    import datetime as dt
+
+    from sqlalchemy import func, select
+
+    from newsroom.models import Event
+
+    count, first_at, last_at = session.execute(
+        select(func.count(Event.id), func.min(Event.first_seen_at), func.max(Event.first_seen_at))
+        .where(Event.story_id == story_id)
+    ).one()
+    if not count or count < config.routine_min_events or first_at is None or last_at is None:
+        return False
+    span_days = (last_at - first_at) / dt.timedelta(days=1)
+    return span_days >= config.routine_min_days
 
 
 def score_pending(session_factory, config: SignificanceConfig, *, limit: int = 100) -> dict[str, int]:
@@ -196,16 +224,12 @@ def score_pending(session_factory, config: SignificanceConfig, *, limit: int = 1
                 .limit(6)
             ).all()
             text = (event.title or "") + "\n" + "\n".join(f"{t or ''} {x or ''}" for t, x in rows)
-            story_count = 0
-            if event.story_id is not None:
-                story_count = int(s.scalar(
-                    select(func.count()).select_from(Event).where(Event.story_id == event.story_id)
-                ) or 0)
+            chronic = _is_chronic_story(s, event.story_id, config)
 
             result = significance_score(SignificanceInputs(
                 rubric=event.rubric, risk_level=event.risk_level, text=text[:4000],
                 independent_source_count=event.independent_source_count or 0,
-                story_event_count=story_count,
+                chronic=chronic,
             ), config)
 
             event.significance = result.score

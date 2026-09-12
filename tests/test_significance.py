@@ -50,10 +50,10 @@ def test_ua_markers_do_not_false_positive_on_foreign_text():
 
 # --- significance_score calibration (offline) ---------------------------------
 
-def _passes(rubric, text, *, risk=None, sources=1, story=0):
+def _passes(rubric, text, *, risk=None, sources=1, chronic=False):
     return significance_score(SignificanceInputs(
         rubric=rubric, risk_level=risk, text=text,
-        independent_source_count=sources, story_event_count=story), CFG).passes
+        independent_source_count=sources, chronic=chronic), CFG).passes
 
 
 def test_foreign_minor_is_dropped():
@@ -78,11 +78,18 @@ def test_critical_is_never_dropped_for_significance():
     assert _passes("crime", "Explosion reported abroad", risk="critical") is True
 
 
-def test_corroboration_and_story_momentum_lift_score():
+def test_corroboration_lifts_score():
     base = significance_score(SignificanceInputs(rubric="crime", text="foreign incident"), CFG).score
     more = significance_score(SignificanceInputs(rubric="crime", text="foreign incident",
-                                                 independent_source_count=3, story_event_count=4), CFG).score
+                                                 independent_source_count=3), CFG).score
     assert more > base
+
+
+def test_chronic_theme_is_penalised():
+    # the "daily drone count is буденність" fix: a chronic theme's event scores lower
+    normal = significance_score(SignificanceInputs(rubric="war", text="Обстріл Києва вночі"), CFG).score
+    chronic = significance_score(SignificanceInputs(rubric="war", text="Обстріл Києва вночі", chronic=True), CFG).score
+    assert chronic < normal
 
 
 # --- score_pending (pg) -------------------------------------------------------
@@ -126,6 +133,36 @@ def test_score_pending_writes_significance_and_journals(pg_engine):
 
     # idempotent: already scored -> nothing to do
     assert score_pending(sf, CFG, limit=50)["scored"] == 0
+
+
+@pytest.mark.pg
+def test_score_pending_penalises_chronic_theme(pg_engine):
+    # a long-lived theme (many events over many days) scores lower than the same
+    # standalone event — routine daily updates are down-weighted
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Story
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        story = Story(slug="chronic", title="Обстріли", state="developing", last_event_at=now)
+        s.add(story)
+        s.flush()
+        # 8 events across ~7 days -> chronic
+        for d in range(8):
+            s.add(Event(status="confirmed", risk_level="high", rubric="war",
+                        title="Нічний обстріл Києва", story_id=story.id,
+                        first_seen_at=now - dt.timedelta(days=7 - d)))
+        # a standalone identical event, no story
+        s.add(Event(status="confirmed", risk_level="high", rubric="war",
+                    title="Нічний обстріл Києва", first_seen_at=now))
+        s.commit()
+
+    score_pending(sf, CFG, limit=100)
+    with Session(pg_engine) as s:
+        chronic_scores = [e.significance for e in s.query(Event).filter(Event.story_id.is_not(None)).all()]
+        standalone = s.query(Event).filter(Event.story_id.is_(None)).one().significance
+        assert all(c < standalone for c in chronic_scores)   # chronic theme down-weighted
 
 
 @pytest.mark.pg
