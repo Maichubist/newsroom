@@ -40,6 +40,10 @@ def factcheck_enabled() -> bool:
     return os.getenv("FACTCHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def factcheck_high_only() -> bool:
+    return os.getenv("FACTCHECK_HIGH_ONLY", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def stories_enabled() -> bool:
     return os.getenv("STORIES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -219,17 +223,20 @@ def build_factchecker_from_env(session_factory):  # pragma: no cover — needs O
 
 async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 30.0,
                             significance_threshold: float | None = None,
+                            risk_levels: tuple[str, ...] | None = None,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Fact-check publishable events (claims -> evidence -> verdict) until stopped.
     Runs before editorial so drafts can build on verified claims. Skips
-    low-significance events when a threshold is set (biggest token saving).
+    low-significance events when a threshold is set (biggest token saving); with
+    `risk_levels` set, only checks those risk levels (FACTCHECK_HIGH_ONLY).
     Nothing published."""
     from newsroom.factcheck import check_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(check_pending, session_factory, checker,
-                                            significance_threshold=significance_threshold)
+                                            significance_threshold=significance_threshold,
+                                            risk_levels=risk_levels)
             if stats.get("events"):
                 log.info("factcheck tick", extra=bind(**stats))
         except Exception:
@@ -600,9 +607,11 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
 
     if factcheck_enabled():
         checker = build_factchecker_from_env(session_factory)
+        fc_risk = ("high", "critical") if factcheck_high_only() else None
         tasks.append(asyncio.create_task(factcheck_forever(
-            session_factory, checker, significance_threshold=significance_threshold)))
-        log.info("fact-checking enabled")
+            session_factory, checker, significance_threshold=significance_threshold,
+            risk_levels=fc_risk)))
+        log.info("fact-checking enabled", extra=bind(high_only=bool(fc_risk)))
     else:
         log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
 

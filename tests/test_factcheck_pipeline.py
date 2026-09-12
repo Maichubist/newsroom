@@ -119,3 +119,37 @@ def test_check_pending_selects_publishable_without_claims(pg_engine):
     from newsroom.models import Claim
     with Session(pg_engine) as s:
         assert s.scalar(select(func.count()).select_from(Claim).where(Claim.event_id == sig_id)) == 0
+
+
+def test_check_pending_high_only_skips_low_risk(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Claim, Event
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        from newsroom.models import Item, Source
+        src = Source(kind="rss", handle_or_url="https://r.example/feed", name="R", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        evi = Item(source_id=src.id, external_id="rev", content_hash="r1", title="Довідка", text="Пруф.")
+        s.add(evi)
+        s.flush()
+        evi_id = evi.id
+        low = Event(status="confirmed", risk_level="low", title="Економіка", first_seen_at=now)
+        high = Event(status="confirmed", risk_level="high", title="Політика", first_seen_at=now)
+        unknown = Event(status="confirmed", risk_level=None, title="Невідомо", first_seen_at=now)
+        s.add_all([low, high, unknown])
+        s.flush()
+        low_id, high_id, unknown_id = low.id, high.id, unknown.id
+        s.commit()
+
+    checker = FactChecker(sf, extractor=FakeExtractor(), searcher=FakeSearcher(evi_id), judge=FakeJudge())
+    check_pending(sf, checker, limit=50, risk_levels=("high", "critical"))
+
+    with Session(pg_engine) as s:
+        def n(eid):
+            return s.scalar(select(func.count()).select_from(Claim).where(Claim.event_id == eid))
+        assert n(high_id) > 0            # high-risk checked
+        assert n(unknown_id) > 0         # unknown-risk checked (conservative)
+        assert n(low_id) == 0            # low-risk skipped

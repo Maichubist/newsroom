@@ -114,14 +114,18 @@ CHECKABLE_STATUSES = ("reported", "confirmed", "rumor")
 
 def check_pending(session_factory, checker: "FactChecker", *, limit: int = 25,
                   significance_threshold: float | None = None,
-                  classify_grace_seconds: float = 180.0) -> dict[str, int]:
+                  classify_grace_seconds: float = 180.0,
+                  risk_levels: tuple[str, ...] | None = None) -> dict[str, int]:
     """One fact-check tick: check publishable events that have no claims yet.
     Once checked, the event has claims and is skipped next tick. When a significance
     threshold is given, low-significance events are skipped — fact-checking (claims +
-    a verdict per claim) is the priciest step, so this is the biggest token saving."""
+    a verdict per claim) is the priciest step, so this is the biggest token saving.
+    When `risk_levels` is given, only events at those risk levels are checked (plus
+    unknown-risk events, checked conservatively): low-risk topics — economy, tech,
+    sport, culture — need no deep verdicts, which cuts fact-check cost further."""
     import datetime as dt
 
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from newsroom.analyze.significance import significance_ready_clause
     from newsroom.models import Claim, Event
@@ -132,6 +136,10 @@ def check_pending(session_factory, checker: "FactChecker", *, limit: int = 25,
     clause = significance_ready_clause(significance_threshold, cutoff)
     if clause is not None:
         conditions.append(clause)
+    if risk_levels:
+        # unknown risk (NULL) is checked too — when the level is uncertain, treat it
+        # as check-worthy (asymmetry of errors, §3.5)
+        conditions.append(or_(Event.risk_level.in_(risk_levels), Event.risk_level.is_(None)))
 
     with session_factory() as s:
         ids = list(s.execute(
