@@ -90,6 +90,28 @@ def test_fresh_channel_seeds_only_recent_not_whole_history(pg_engine):
         assert ids == [96, 97, 98, 99, 100]     # only the 5 most recent
 
 
+def test_backfill_drops_messages_older_than_window(pg_engine):
+    # only posts within the 24h window are ingested, whatever the source
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        sid = _tg_source(s, "@aged")
+        s.commit()
+
+    now = dt.datetime.now(UTC)
+    msgs = [
+        _msg(id=1, message="old", date=now - dt.timedelta(hours=48)),
+        _msg(id=2, message="fresh", date=now - dt.timedelta(hours=2)),
+        _msg(id=3, message="edge-old", date=now - dt.timedelta(hours=30)),
+    ]
+    collector = TelegramCollector(sf)
+    n = asyncio.run(collector.backfill_source(FakeClient(msgs), sid, peer="x"))
+
+    assert n == 1
+    with Session(pg_engine) as s:
+        ids = set(s.scalars(select(Item.external_id).where(Item.source_id == sid)).all())
+        assert ids == {"2"}     # only the fresh post
+
+
 def test_backfill_waits_out_floodwait(pg_engine):
     class FloodWaitError(Exception):
         def __init__(self, seconds):

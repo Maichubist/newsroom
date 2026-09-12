@@ -18,7 +18,7 @@ import logging
 import os
 from typing import Awaitable, Callable
 
-from newsroom.collectors.base import RawItem, RawMedia
+from newsroom.collectors.base import RawItem, RawMedia, collect_max_age_hours, is_recent
 
 log = logging.getLogger("newsroom.collectors.telegram")
 
@@ -326,6 +326,10 @@ class TelegramCollector:
                     peer, min_id=cursor, reverse=True, limit=max_backfill)]
 
         messages = await run_with_floodwait(fetch, sleeper=self._sleeper)
+        # keep only posts within the collection window (news, not archive)
+        now = _utc_now()
+        max_age = collect_max_age_hours()
+        messages = [m for m in messages if is_recent(getattr(m, "date", None), now, max_age)]
         for msg in messages:
             self.on_new_message(source_id, msg, channel_username=channel_username)
         # albums buffered during backfill are complete now — force-flush them.

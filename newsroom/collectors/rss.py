@@ -13,7 +13,7 @@ from typing import Callable
 
 import feedparser
 
-from newsroom.collectors.base import RawItem, RawMedia
+from newsroom.collectors.base import RawItem, RawMedia, collect_max_age_hours, is_recent
 from newsroom.logsetup import bind
 
 # NB: DB-touching imports (ingest, models) are done lazily inside RssCollector
@@ -172,6 +172,10 @@ class RssCollector:
             return CollectResult(source_id, ok=False, error=str(exc))
 
         items = parse_feed(source_id, raw, default_lang=default_lang)
+        # keep only items published within the collection window (§: news, not archive)
+        now = dt.datetime.now(dt.timezone.utc)
+        max_age = collect_max_age_hours()
+        items = [ri for ri in items if is_recent(ri.published_at, now, max_age)]
         created = updated = 0
         with self.session_factory() as s:
             src = s.get(Source, source_id)

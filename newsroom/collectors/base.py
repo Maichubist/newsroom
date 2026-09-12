@@ -10,6 +10,29 @@ _WS_RE = re.compile(r"\s+")
 # Word tokens across Latin, Cyrillic (incl. Ukrainian і ї є ґ) and digits.
 _TOKEN_RE = re.compile(r"[0-9a-zA-Zа-яА-ЯіІїЇєЄґҐ']+")
 
+# We collect news, not an archive: every source ingests only items published within
+# this window. Overridable via COLLECT_MAX_AGE_HOURS.
+DEFAULT_MAX_ITEM_AGE_HOURS = 24
+
+
+def collect_max_age_hours() -> int:
+    import os
+
+    try:
+        return int(os.getenv("COLLECT_MAX_AGE_HOURS", str(DEFAULT_MAX_ITEM_AGE_HOURS)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ITEM_AGE_HOURS
+
+
+def is_recent(published_at: "dt.datetime | None", now: "dt.datetime", max_age_hours: int) -> bool:
+    """Keep an item only if it was published within the window. An item with no
+    known date is kept (a feed omitting dates is usually serving current items — we
+    don't drop possibly-fresh news on a missing timestamp). max_age_hours <= 0
+    disables the window (keep everything)."""
+    if max_age_hours <= 0 or published_at is None:
+        return True
+    return published_at >= now - dt.timedelta(hours=max_age_hours)
+
 
 def normalize_text(value: str | None) -> str:
     """Lowercase, collapse whitespace, strip — for stable exact-dedup hashing."""
