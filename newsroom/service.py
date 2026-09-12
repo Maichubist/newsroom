@@ -172,14 +172,17 @@ def build_factbase_builder_from_env(session_factory):  # pragma: no cover — ne
 
 
 async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30.0,
+                           significance_threshold: float | None = None,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Build the shared fact base for publishable events until stopped. Runs
-    before fact-check and editorial so both work from one viewpoint. Nothing published."""
+    before fact-check and editorial so both work from one viewpoint. Skips
+    low-significance events when a threshold is set. Nothing published."""
     from newsroom.factbase import build_pending
 
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(build_pending, session_factory, builder)
+            stats = await asyncio.to_thread(build_pending, session_factory, builder,
+                                            significance_threshold=significance_threshold)
             if stats.get("events"):
                 log.info("factbase tick", extra=bind(**stats))
         except Exception:
@@ -215,14 +218,18 @@ def build_factchecker_from_env(session_factory):  # pragma: no cover — needs O
 
 
 async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 30.0,
+                            significance_threshold: float | None = None,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Fact-check publishable events (claims -> evidence -> verdict) until stopped.
-    Runs before editorial so drafts can build on verified claims. Nothing published."""
+    Runs before editorial so drafts can build on verified claims. Skips
+    low-significance events when a threshold is set (biggest token saving).
+    Nothing published."""
     from newsroom.factcheck import check_pending
 
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(check_pending, session_factory, checker)
+            stats = await asyncio.to_thread(check_pending, session_factory, checker,
+                                            significance_threshold=significance_threshold)
             if stats.get("events"):
                 log.info("factcheck tick", extra=bind(**stats))
         except Exception:
@@ -264,14 +271,17 @@ def build_story_updater_from_env(session_factory):  # pragma: no cover — needs
 
 
 async def story_updates_forever(session_factory, updater, *, tick_seconds: float = 30.0,
+                                significance_threshold: float | None = None,
                                 stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Classify how each new event moves its story (update_type) and update the
-    running summary, before editorial drafts posts. Nothing is published."""
+    running summary, before editorial drafts posts. Skips low-significance events
+    when a threshold is set. Nothing is published."""
     from newsroom.editorial import classify_pending
 
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(classify_pending, session_factory, updater)
+            stats = await asyncio.to_thread(classify_pending, session_factory, updater,
+                                            significance_threshold=significance_threshold)
             if stats.get("classified"):
                 log.info("story-update tick", extra=bind(**stats))
         except Exception:
@@ -534,7 +544,23 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         sync_sources(s, load_sources(CONFIG_PATH))
         s.commit()
 
+    # Significance threshold is loaded once and shared: the scoring loop uses the
+    # full config, while factbase / factcheck / story-updates / editorial take just
+    # the threshold to skip low-significance events (no tokens on unpostable news).
+    significance_threshold = None
+    sig_config = None
+    if significance_enabled():
+        from newsroom.analyze.significance import load_significance_config
+
+        sig_config = load_significance_config(CONFIG_DIR / "significance.yaml")
+        significance_threshold = sig_config.threshold
+
     tasks = [asyncio.create_task(poll_rss_forever(session_factory))]
+    if sig_config is not None:
+        tasks.append(asyncio.create_task(significance_forever(session_factory, sig_config)))
+        log.info("significance gate enabled", extra=bind(threshold=significance_threshold))
+    else:
+        log.info("significance gate disabled (SIGNIFICANCE_ENABLED off)")
     telegram_collector = None
     if telegram_enabled():
         telegram_collector = TelegramCollector(session_factory)
@@ -566,14 +592,16 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
 
     if factbase_enabled():
         builder = build_factbase_builder_from_env(session_factory)
-        tasks.append(asyncio.create_task(factbase_forever(session_factory, builder)))
+        tasks.append(asyncio.create_task(factbase_forever(
+            session_factory, builder, significance_threshold=significance_threshold)))
         log.info("fact base enabled")
     else:
         log.info("fact base disabled (FACTBASE_ENABLED off)")
 
     if factcheck_enabled():
         checker = build_factchecker_from_env(session_factory)
-        tasks.append(asyncio.create_task(factcheck_forever(session_factory, checker)))
+        tasks.append(asyncio.create_task(factcheck_forever(
+            session_factory, checker, significance_threshold=significance_threshold)))
         log.info("fact-checking enabled")
     else:
         log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
@@ -600,21 +628,11 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
 
     if story_updates_enabled():
         updater = build_story_updater_from_env(session_factory)
-        tasks.append(asyncio.create_task(story_updates_forever(session_factory, updater)))
+        tasks.append(asyncio.create_task(story_updates_forever(
+            session_factory, updater, significance_threshold=significance_threshold)))
         log.info("story updates enabled")
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
-
-    significance_threshold = None
-    if significance_enabled():
-        from newsroom.analyze.significance import load_significance_config
-
-        sig_config = load_significance_config(CONFIG_DIR / "significance.yaml")
-        significance_threshold = sig_config.threshold
-        tasks.append(asyncio.create_task(significance_forever(session_factory, sig_config)))
-        log.info("significance gate enabled", extra=bind(threshold=significance_threshold))
-    else:
-        log.info("significance gate disabled (SIGNIFICANCE_ENABLED off)")
 
     if editorial_enabled():
         pipeline = build_editorial_pipeline_from_env(session_factory)

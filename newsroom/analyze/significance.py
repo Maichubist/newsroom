@@ -90,6 +90,24 @@ def load_significance_config(path: str | Path) -> SignificanceConfig:
         raise SignificanceConfigError(f"bad significance value: {exc}") from exc
 
 
+def significance_ready_clause(threshold: float | None, cutoff):
+    """SQLAlchemy condition for gating an expensive LLM step on significance: the
+    event scored at or above the threshold, OR is not scored yet but has waited out
+    the grace (so nothing stalls if scoring is off). None when no threshold is set —
+    the caller then adds no significance condition. Keeps factbase/factcheck/story
+    updates from spending tokens on events the significance gate will drop."""
+    if threshold is None:
+        return None
+    from sqlalchemy import and_, or_
+
+    from newsroom.models import Event
+
+    return or_(
+        Event.significance >= threshold,
+        and_(Event.significance.is_(None), Event.updated_at < cutoff),
+    )
+
+
 def is_ua_relevant(text: str | None, markers: tuple[re.Pattern, ...]) -> bool:
     """True if the text carries any Ukrainian marker. A positive signal (bonus),
     not a deny-filter — a miss only lowers the score, so a false negative can't

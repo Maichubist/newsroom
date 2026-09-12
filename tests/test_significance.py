@@ -126,3 +126,38 @@ def test_score_pending_writes_significance_and_journals(pg_engine):
 
     # idempotent: already scored -> nothing to do
     assert score_pending(sf, CFG, limit=50)["scored"] == 0
+
+
+@pytest.mark.pg
+def test_significance_gate_skips_low_events_in_expensive_step(pg_engine):
+    # the shared gate (used by factbase/factcheck/story-updates) must skip a
+    # low-significance event and process a significant one, saving LLM tokens
+    from types import SimpleNamespace
+
+    from newsroom.db import make_session_factory
+    from newsroom.factbase.pipeline import build_pending
+    from newsroom.models import Event
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        low = Event(status="confirmed", rubric="sport", title="low", significance=0.20, first_seen_at=now)
+        high = Event(status="confirmed", rubric="politics", title="high", significance=0.90, first_seen_at=now)
+        s.add_all([low, high])
+        s.flush()
+        low_id, high_id = low.id, high.id
+        s.commit()
+
+    class _FakeBuilder:
+        model = "fake"
+
+        def __init__(self):
+            self.built = []
+
+        def build_event(self, event_id):
+            self.built.append(event_id)
+            return SimpleNamespace(skipped=False, facts=1)
+
+    builder = _FakeBuilder()
+    build_pending(sf, builder, limit=50, significance_threshold=0.55)
+    assert builder.built == [high_id]      # low-significance event never reached the builder

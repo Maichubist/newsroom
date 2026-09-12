@@ -112,20 +112,30 @@ class FactChecker:
 CHECKABLE_STATUSES = ("reported", "confirmed", "rumor")
 
 
-def check_pending(session_factory, checker: "FactChecker", *, limit: int = 25) -> dict[str, int]:
+def check_pending(session_factory, checker: "FactChecker", *, limit: int = 25,
+                  significance_threshold: float | None = None,
+                  classify_grace_seconds: float = 180.0) -> dict[str, int]:
     """One fact-check tick: check publishable events that have no claims yet.
-    Once checked, the event has claims and is skipped next tick."""
+    Once checked, the event has claims and is skipped next tick. When a significance
+    threshold is given, low-significance events are skipped — fact-checking (claims +
+    a verdict per claim) is the priciest step, so this is the biggest token saving."""
+    import datetime as dt
+
     from sqlalchemy import select
 
+    from newsroom.analyze.significance import significance_ready_clause
     from newsroom.models import Claim, Event
 
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=classify_grace_seconds)
+    have_claims = select(Claim.event_id).distinct()
+    conditions = [Event.status.in_(CHECKABLE_STATUSES), Event.id.not_in(have_claims)]
+    clause = significance_ready_clause(significance_threshold, cutoff)
+    if clause is not None:
+        conditions.append(clause)
+
     with session_factory() as s:
-        have_claims = select(Claim.event_id).distinct()
         ids = list(s.execute(
-            select(Event.id)
-            .where(Event.status.in_(CHECKABLE_STATUSES), Event.id.not_in(have_claims))
-            .order_by(Event.id)
-            .limit(limit)
+            select(Event.id).where(*conditions).order_by(Event.id).limit(limit)
         ).scalars().all())
 
     stats = {"events": 0, "claims": 0, "checked": 0}

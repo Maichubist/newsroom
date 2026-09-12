@@ -89,19 +89,29 @@ class FactBaseBuilder:
                               reactions=len(reactions))
 
 
-def build_pending(session_factory, builder: "FactBaseBuilder", *, limit: int = 25) -> dict[str, int]:
+def build_pending(session_factory, builder: "FactBaseBuilder", *, limit: int = 25,
+                  significance_threshold: float | None = None,
+                  classify_grace_seconds: float = 180.0) -> dict[str, int]:
     """One fact-base tick: build the shared base for publishable events that have
-    none yet. Once built, the event has a fact_base and is skipped next tick."""
+    none yet. Once built, the event has a fact_base and is skipped next tick. When a
+    significance threshold is given, low-significance events are skipped — no tokens
+    spent on news that will not be posted."""
+    import datetime as dt
+
     from sqlalchemy import select
 
+    from newsroom.analyze.significance import significance_ready_clause
     from newsroom.models import Event
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=classify_grace_seconds)
+    conditions = [Event.status.in_(FACTBASE_STATUSES), Event.fact_base.is_(None)]
+    clause = significance_ready_clause(significance_threshold, cutoff)
+    if clause is not None:
+        conditions.append(clause)
 
     with session_factory() as s:
         ids = list(s.execute(
-            select(Event.id)
-            .where(Event.status.in_(FACTBASE_STATUSES), Event.fact_base.is_(None))
-            .order_by(Event.id)
-            .limit(limit)
+            select(Event.id).where(*conditions).order_by(Event.id).limit(limit)
         ).scalars().all())
 
     stats = {"events": 0, "facts": 0}
