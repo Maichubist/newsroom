@@ -56,6 +56,10 @@ def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def media_ogimage_enabled() -> bool:
+    return os.getenv("MEDIA_OGIMAGE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def media_download_enabled() -> bool:
     return os.getenv("MEDIA_DOWNLOAD_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -364,6 +368,29 @@ def build_media_downloader_from_env(session_factory):  # pragma: no cover — Pi
     return MediaDownloader(session_factory, store=LocalMediaStore(store_dir), decoder=PillowDecoder())
 
 
+def build_ogimage_resolver_from_env(session_factory):
+    """Assemble the og:image resolver (HTTP page fetch). No LLM."""
+    from newsroom.media import OgImageResolver
+
+    return OgImageResolver(session_factory)
+
+
+async def ogimage_forever(session_factory, resolver, *, tick_seconds: float = 45.0,
+                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Resolve og:image for filter-passed items whose feed carried no media, so the
+    downloader then has something to fetch. Runs before media download."""
+    from newsroom.media import resolve_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(resolve_pending, session_factory, resolver)
+            if stats.get("found"):
+                log.info("og-image tick", extra=bind(**stats))
+        except Exception:
+            log.exception("og-image tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def media_download_forever(session_factory, downloader, *, tick_seconds: float = 45.0,
                                  stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Download media for filter-passed items and compute pHashes, feeding the
@@ -522,6 +549,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("verification enabled")
     else:
         log.info("verification disabled (VERIFY_ENABLED off)")
+
+    if media_ogimage_enabled():
+        resolver = build_ogimage_resolver_from_env(session_factory)
+        tasks.append(asyncio.create_task(ogimage_forever(session_factory, resolver)))
+        log.info("og:image resolution enabled")
+    else:
+        log.info("og:image resolution disabled (MEDIA_OGIMAGE_ENABLED off)")
 
     if media_download_enabled():
         downloader = build_media_downloader_from_env(session_factory)
