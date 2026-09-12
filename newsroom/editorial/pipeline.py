@@ -171,17 +171,29 @@ class EditorialPipeline:
         return pub_id
 
 
-def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25) -> dict[str, int]:
+def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25,
+                   classify_grace_seconds: float = 180.0) -> dict[str, int]:
     """One editorial tick: draft posts for publishable events that don't have a
     publication yet. Events the story-update step classified as summary-only
     (confirmation / reaction / minor) are skipped — they only update the story
-    summary, not post (architecture §7). Unclassified events are still drafted.
+    summary, not post (architecture §7).
+
+    Draftable: a postworthy classification (new_fact / refutation / consequence),
+    OR an unclassified event that is either unlinked (no story to dedup against)
+    or has waited out `classify_grace_seconds` — so a story-linked event gets a
+    window for story-updates to classify it (and mark a near-duplicate summary-only)
+    before it is drafted, without stalling forever if story-updates is off.
     Once produced, the event has a publications row and is skipped next tick.
     Nothing is published."""
-    from sqlalchemy import or_, select
+    import datetime as dt
 
-    from newsroom.editorial.updates import SUMMARY_ONLY_UPDATE_TYPES
+    from sqlalchemy import and_, or_, select
+
+    from newsroom.editorial.updates import SUMMARY_ONLY_UPDATE_TYPES, VALID_UPDATE_TYPES
     from newsroom.models import Event, Publication
+
+    postworthy = tuple(VALID_UPDATE_TYPES - SUMMARY_ONLY_UPDATE_TYPES)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=classify_grace_seconds)
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
@@ -190,8 +202,13 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
             .where(
                 Event.status.in_(("reported", "confirmed", "rumor")),
                 Event.id.not_in(have_pub),
-                or_(Event.update_type.is_(None),
-                    Event.update_type.not_in(SUMMARY_ONLY_UPDATE_TYPES)),
+                or_(
+                    Event.update_type.in_(postworthy),
+                    and_(
+                        Event.update_type.is_(None),
+                        or_(Event.story_id.is_(None), Event.updated_at < cutoff),
+                    ),
+                ),
             )
             .order_by(Event.id)
             .limit(limit)

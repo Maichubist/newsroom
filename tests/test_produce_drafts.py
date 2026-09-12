@@ -11,7 +11,7 @@ from newsroom.analyze.ai_accent import load_ai_accent
 from newsroom.analyze.stoplist import load_stoplist
 from newsroom.db import make_session_factory
 from newsroom.editorial import DraftContent, EditorialPipeline, produce_drafts
-from newsroom.models import Event, Publication
+from newsroom.models import Event, Publication, Story
 
 pytestmark = pytest.mark.pg
 
@@ -100,6 +100,39 @@ def test_produce_drafts_only_publishable_and_idempotent(pg_engine):
 
     # second tick: events already have drafts -> nothing produced
     assert produce_drafts(sf, pipe, limit=50)["produced"] == 0
+
+
+def test_linked_unclassified_event_waits_then_drafts(pg_engine):
+    from sqlalchemy import text
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        story = Story(slug="s-wait", title="W", state="developing", last_event_at=now)
+        s.add(story)
+        s.flush()
+        ev = Event(status="confirmed", rubric="politics", title="Щойно прилинкована подія",
+                   story_id=story.id, first_seen_at=now)   # linked, update_type still None, just updated
+        s.add(ev)
+        s.flush()
+        eid = ev.id
+        s.commit()
+
+    pipe = EditorialPipeline(sf, generator=FakeGenerator(), stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+
+    # within the grace window: held so story-updates can classify it first
+    produce_drafts(sf, pipe, limit=50)
+    with Session(pg_engine) as s:
+        assert s.execute(select(Publication).where(Publication.event_id == eid)).first() is None
+
+    # aged past the grace window (story-updates never classified it): drafts anyway
+    with Session(pg_engine) as s:
+        s.execute(text("UPDATE events SET updated_at = :ts WHERE id = :id"),
+                  {"ts": now - dt.timedelta(minutes=10), "id": eid})
+        s.commit()
+    produce_drafts(sf, pipe, limit=50)
+    with Session(pg_engine) as s:
+        assert s.execute(select(Publication).where(Publication.event_id == eid)).first() is not None
 
 
 def test_produce_drafts_skips_summary_only_update_types(pg_engine):
