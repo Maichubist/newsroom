@@ -48,6 +48,10 @@ def story_updates_enabled() -> bool:
     return os.getenv("STORY_UPDATES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def significance_enabled() -> bool:
+    return os.getenv("SIGNIFICANCE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -285,14 +289,35 @@ def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — 
     )
 
 
+async def significance_forever(session_factory, config, *, tick_seconds: float = 30.0,
+                               stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Score each postable event's significance (T1 gate) before editorial, so
+    niche/minor news is skipped. Deterministic — no LLM. Nothing is published."""
+    from newsroom.analyze.significance import score_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(score_pending, session_factory, config)
+            if stats.get("scored"):
+                log.info("significance tick", extra=bind(**stats))
+        except Exception:
+            log.exception("significance tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 30.0,
+                            significance_threshold: float | None = None,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Draft posts for publishable events until stopped. Nothing is published."""
+    """Draft posts for publishable events until stopped. When a significance
+    threshold is given, events scored below it are skipped (T1 gate). Nothing is
+    published."""
     from newsroom.editorial import produce_drafts
 
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(produce_drafts, session_factory, pipeline)
+            stats = await asyncio.to_thread(
+                produce_drafts, session_factory, pipeline,
+                significance_threshold=significance_threshold)
             if stats.get("produced"):
                 log.info("editorial tick", extra=bind(**stats))
         except Exception:
@@ -546,9 +571,21 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
 
+    significance_threshold = None
+    if significance_enabled():
+        from newsroom.analyze.significance import load_significance_config
+
+        sig_config = load_significance_config(CONFIG_DIR / "significance.yaml")
+        significance_threshold = sig_config.threshold
+        tasks.append(asyncio.create_task(significance_forever(session_factory, sig_config)))
+        log.info("significance gate enabled", extra=bind(threshold=significance_threshold))
+    else:
+        log.info("significance gate disabled (SIGNIFICANCE_ENABLED off)")
+
     if editorial_enabled():
         pipeline = build_editorial_pipeline_from_env(session_factory)
-        tasks.append(asyncio.create_task(editorial_forever(session_factory, pipeline)))
+        tasks.append(asyncio.create_task(editorial_forever(
+            session_factory, pipeline, significance_threshold=significance_threshold)))
         log.info("editorial drafting enabled")
     else:
         log.info("editorial drafting disabled (EDITORIAL_ENABLED off)")

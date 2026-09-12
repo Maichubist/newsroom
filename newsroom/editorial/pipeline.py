@@ -172,7 +172,8 @@ class EditorialPipeline:
 
 
 def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25,
-                   classify_grace_seconds: float = 180.0) -> dict[str, int]:
+                   classify_grace_seconds: float = 180.0,
+                   significance_threshold: float | None = None) -> dict[str, int]:
     """One editorial tick: draft posts for publishable events that don't have a
     publication yet. Events the story-update step classified as summary-only
     (confirmation / reaction / minor) are skipped — they only update the story
@@ -195,21 +196,29 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
     postworthy = tuple(VALID_UPDATE_TYPES - SUMMARY_ONLY_UPDATE_TYPES)
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=classify_grace_seconds)
 
+    conditions = [
+        Event.status.in_(("reported", "confirmed", "rumor")),
+        or_(
+            Event.update_type.in_(postworthy),
+            and_(
+                Event.update_type.is_(None),
+                or_(Event.story_id.is_(None), Event.updated_at < cutoff),
+            ),
+        ),
+    ]
+    if significance_threshold is not None:
+        # skip events scored below the bar; an unscored event waits the grace for
+        # the scorer, then drafts anyway so nothing stalls if scoring is off (T1 gate)
+        conditions.append(or_(
+            Event.significance >= significance_threshold,
+            and_(Event.significance.is_(None), or_(Event.story_id.is_(None), Event.updated_at < cutoff)),
+        ))
+
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         ids = list(s.execute(
             select(Event.id)
-            .where(
-                Event.status.in_(("reported", "confirmed", "rumor")),
-                Event.id.not_in(have_pub),
-                or_(
-                    Event.update_type.in_(postworthy),
-                    and_(
-                        Event.update_type.is_(None),
-                        or_(Event.story_id.is_(None), Event.updated_at < cutoff),
-                    ),
-                ),
-            )
+            .where(Event.id.not_in(have_pub), *conditions)
             .order_by(Event.id)
             .limit(limit)
         ).scalars().all())

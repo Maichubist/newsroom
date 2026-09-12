@@ -135,6 +135,27 @@ def test_linked_unclassified_event_waits_then_drafts(pg_engine):
         assert s.execute(select(Publication).where(Publication.event_id == eid)).first() is not None
 
 
+def test_significance_threshold_skips_low_events(pg_engine):
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        low = Event(status="confirmed", rubric="sport", title="Нішева подія",
+                    significance=0.20, first_seen_at=now)
+        high = Event(status="confirmed", rubric="politics", title="Значима подія",
+                     significance=0.90, first_seen_at=now)
+        s.add_all([low, high])
+        s.flush()
+        low_id, high_id = low.id, high.id
+        s.commit()
+
+    pipe = EditorialPipeline(sf, generator=FakeGenerator(), stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    produce_drafts(sf, pipe, limit=50, significance_threshold=0.55)
+
+    with Session(pg_engine) as s:
+        drafted = set(s.execute(select(Publication.event_id)).scalars().all())
+        assert high_id in drafted and low_id not in drafted
+
+
 def test_produce_drafts_skips_summary_only_update_types(pg_engine):
     sf = make_session_factory(pg_engine)
     e_new = _event(pg_engine, status="confirmed", title="Новий факт", update_type="new_fact")

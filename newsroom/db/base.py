@@ -33,11 +33,25 @@ def make_session_factory(engine: Engine) -> sessionmaker:
     return sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
+# Additive columns introduced after a table already exists in the field. create_all
+# only creates missing *tables*, never adds a column to an existing one, so these
+# non-destructive ALTERs bring an older DB up to date. Each is idempotent
+# (ADD COLUMN IF NOT EXISTS); keep them append-only (architecture: only additive
+# migrations, nothing dropped or renamed).
+_ADDITIVE_COLUMNS = (
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS significance double precision",
+)
+
+
 def init_db(engine: Engine) -> None:
-    """Create the pgvector extension and all tables. Safe to call repeatedly."""
+    """Create the pgvector extension and all tables, then apply additive column
+    migrations. Safe to call repeatedly."""
     # Import registers every model on Base.metadata before create_all.
     from newsroom import models  # noqa: F401
 
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for stmt in _ADDITIVE_COLUMNS:
+            conn.execute(text(stmt))
