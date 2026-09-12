@@ -532,11 +532,12 @@ async def monitoring_forever(session_factory, *, tick_seconds: float = 120.0,
 
 
 async def demand_forever(session_factory, collector, *, tick_seconds: float = 1800.0,
-                         sources_every: int = 4, stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+                         sources_every: int = 4, analytics_every: int = 2,
+                         stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Snapshot engagement of monitored source posts + channel sizes via the shared
-    Telethon session, so demand data accumulates. Slow cadence (engagement changes
-    slowly); subscriber counts even slower. Reads only — nothing is published."""
-    from newsroom.analyze.demand import DemandCollector, TelethonDemandSource
+    Telethon session, then recompute the learned per-rubric demand index (DB-only) so
+    curation can read it. Slow cadence. Reads only — nothing is published."""
+    from newsroom.analyze.demand import DemandCollector, TelethonDemandSource, refresh_demand
 
     loop = asyncio.get_running_loop()
     client = await collector.wait_client()
@@ -547,6 +548,10 @@ async def demand_forever(session_factory, collector, *, tick_seconds: float = 18
             stats = await asyncio.to_thread(demand.collect_items)
             if ticks % sources_every == 0:
                 await asyncio.to_thread(demand.collect_sources)
+            if ticks % analytics_every == 0:
+                by_rubric = await asyncio.to_thread(refresh_demand, session_factory)
+                if by_rubric:
+                    log.info("demand index", extra=bind(rubrics=len(by_rubric)))
             if stats.get("recorded"):
                 log.info("demand tick", extra=bind(**stats))
         except Exception:

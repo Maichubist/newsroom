@@ -109,6 +109,73 @@ def test_collector_records_item_and_source_metrics(pg_engine):
 
 
 @pytest.mark.pg
+def test_compute_rubric_demand_learns_and_discounts_aggregators(pg_engine):
+    from newsroom.analyze.demand import compute_rubric_demand, load_demand, store_demand
+    from newsroom.db import make_session_factory
+    from newsroom.models import (Event, EventItem, Item, ItemMetric, Source,
+                                  SourceMetric)
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def _post(handle, tier, rubric, forwards, subs):
+        with Session(pg_engine) as s:
+            src = Source(kind="telegram", handle_or_url=handle, name=handle, origin="ua", tier=tier)
+            s.add(src)
+            s.flush()
+            s.add(SourceMetric(source_id=src.id, subscribers=subs))
+            it = Item(source_id=src.id, external_id=handle + "1",
+                      content_hash=(handle).ljust(64, "0")[:64], title="t", published_at=now)
+            s.add(it)
+            s.flush()
+            ev = Event(status="confirmed", rubric=rubric, title="t", first_seen_at=now)
+            s.add(ev)
+            s.flush()
+            s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+            s.add(ItemMetric(item_id=it.id, views=1000, forwards=forwards))
+            s.commit()
+
+    _post("@pol", "media", "politics", forwards=100, subs=1000)   # high engagement
+    _post("@spo", "media", "sport", forwards=2, subs=1000)        # low engagement
+
+    with Session(pg_engine) as s:
+        demand = compute_rubric_demand(s, window_days=7)
+    assert demand["politics"] > demand["sport"]
+    assert demand["politics"] == pytest.approx(1.0) and demand["sport"] == pytest.approx(0.0)
+
+    # store/load roundtrip
+    with Session(pg_engine) as s:
+        store_demand(s, demand)
+        s.commit()
+    with Session(pg_engine) as s:
+        assert load_demand(s)["politics"] == pytest.approx(1.0)
+
+
+@pytest.mark.pg
+def test_compute_rubric_demand_empty_without_subscribers(pg_engine):
+    # no source_metrics -> engagement can't be normalised -> no demand learned
+    from newsroom.analyze.demand import compute_rubric_demand
+    from newsroom.models import Event, EventItem, Item, ItemMetric, Source
+
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@ns", name="ns", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="n1", content_hash="n1".ljust(64, "0"),
+                  title="t", published_at=now)
+        s.add(it)
+        s.flush()
+        ev = Event(status="confirmed", rubric="politics", title="t", first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(ItemMetric(item_id=it.id, forwards=50))
+        s.commit()
+        assert compute_rubric_demand(s, window_days=7) == {}
+
+
+@pytest.mark.pg
 def test_record_helpers_append_snapshots(pg_engine):
     from newsroom.models import ItemMetric
 

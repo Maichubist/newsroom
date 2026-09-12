@@ -24,6 +24,12 @@ log = logging.getLogger("newsroom.analyze.demand")
 # emotional reaction — weight them higher in the engagement rate.
 DEFAULT_FORWARD_WEIGHT = 2.0
 
+# Manipulation discount: aggregator/anonymous channels are the most botted/IPSO-prone,
+# so their engagement counts for less when we learn what the audience genuinely wants.
+TIER_WEIGHT = {"official": 1.0, "media": 1.0, "aggregator": 0.5, "leak": 0.3, "anonymous": 0.3}
+
+DEMAND_STATE_KEY = "demand_by_rubric"
+
 
 def engagement_rate(stats: MessageStats, subscribers: int | None,
                     *, forward_weight: float = DEFAULT_FORWARD_WEIGHT) -> float | None:
@@ -140,6 +146,113 @@ class DemandCollector:
                 s.commit()
             stats["recorded"] += 1
         return stats
+
+
+def _median(values: list[float]) -> float:
+    s = sorted(values)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def compute_rubric_demand(session, *, window_days: int = 7,
+                          forward_weight: float = DEFAULT_FORWARD_WEIGHT) -> dict[str, float]:
+    """Learn per-rubric demand from competitor engagement (docs/demand-intelligence.md).
+
+    For each measured source post in the window: reach-normalised engagement
+    (forwards weighted), discounted by source tier (bots/IPSO on aggregators count
+    less). Group by the rubric of the post's event, take the MEDIAN (robust to
+    spikes), then min-max normalise across rubrics to a comparative 0..1 index —
+    comparison in a batch, not an absolute score (CLAUDE.md). {} until data exists."""
+    import datetime as dt
+
+    from sqlalchemy import func, select
+
+    from newsroom.models import Event, EventItem, Item, ItemMetric, Source, SourceMetric
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=window_days)
+
+    # latest subscriber count per source
+    subs: dict[int, int] = {}
+    sub_rows = session.execute(
+        select(SourceMetric.source_id, SourceMetric.subscribers, SourceMetric.measured_at)
+        .order_by(SourceMetric.source_id, SourceMetric.measured_at.desc())
+    ).all()
+    for source_id, subscribers, _at in sub_rows:
+        if source_id not in subs and subscribers:
+            subs[source_id] = int(subscribers)
+
+    # latest engagement snapshot per measured item in the window, with tier + rubric
+    rows = session.execute(
+        select(ItemMetric.item_id, ItemMetric.views, ItemMetric.reactions, ItemMetric.forwards,
+               ItemMetric.measured_at, Source.id, Source.tier, Event.rubric)
+        .join(Item, Item.id == ItemMetric.item_id)
+        .join(Source, Source.id == Item.source_id)
+        .join(EventItem, EventItem.item_id == Item.id)
+        .join(Event, Event.id == EventItem.event_id)
+        .where(ItemMetric.measured_at >= cutoff, Event.rubric.is_not(None))
+        .order_by(ItemMetric.item_id, ItemMetric.measured_at.desc())
+    ).all()
+
+    seen: set[int] = set()
+    by_rubric: dict[str, list[float]] = {}
+    for item_id, views, reactions, forwards, _at, source_id, tier, rubric in rows:
+        if item_id in seen:
+            continue                        # keep only the latest snapshot per item
+        seen.add(item_id)
+        rate = engagement_rate(MessageStats(views=views, reactions=reactions, forwards=forwards),
+                               subs.get(source_id), forward_weight=forward_weight)
+        if rate is None:
+            continue
+        weighted = rate * TIER_WEIGHT.get((tier or "").lower(), 0.5)
+        by_rubric.setdefault(rubric, []).append(weighted)
+
+    medians = {rubric: _median(vals) for rubric, vals in by_rubric.items() if vals}
+    if not medians:
+        return {}
+    lo, hi = min(medians.values()), max(medians.values())
+    if hi <= lo:
+        return {r: 0.5 for r in medians}    # single level — neutral
+    return {r: (m - lo) / (hi - lo) for r, m in medians.items()}
+
+
+def store_demand(session, by_rubric: dict[str, float]) -> None:
+    """Persist the learned demand index for curation to read. Flushes; caller commits."""
+    import datetime as dt
+
+    from newsroom.models import SystemState
+
+    value = {"by_rubric": by_rubric, "at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    row = session.get(SystemState, DEMAND_STATE_KEY)
+    if row is None:
+        session.add(SystemState(key=DEMAND_STATE_KEY, value=value))
+    else:
+        row.value = value
+    session.flush()
+
+
+def load_demand(session) -> dict[str, float]:
+    """Read the learned per-rubric demand index ({} if none yet)."""
+    from newsroom.models import SystemState
+
+    row = session.get(SystemState, DEMAND_STATE_KEY)
+    if row and isinstance(row.value, dict):
+        by_rubric = row.value.get("by_rubric")
+        if isinstance(by_rubric, dict):
+            return {str(k): float(v) for k, v in by_rubric.items()}
+    return {}
+
+
+def refresh_demand(session_factory, *, window_days: int = 7) -> dict[str, float]:
+    """One analytics tick: recompute per-rubric demand and store it. Returns the index."""
+    with session_factory() as s:
+        by_rubric = compute_rubric_demand(s, window_days=window_days)
+        if by_rubric:
+            store_demand(s, by_rubric)
+            s.commit()
+    return by_rubric
 
 
 class TelethonDemandSource:  # pragma: no cover - network / MTProto

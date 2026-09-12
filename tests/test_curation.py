@@ -49,10 +49,34 @@ class FakeRanker:
     def __init__(self, decisions):
         self.decisions = decisions
         self.seen: list[int] = []
+        self.candidates: list = []
 
     def rank(self, candidates):
         self.seen = [c.event_id for c in candidates]
+        self.candidates = list(candidates)
         return {c.event_id: self.decisions.get(c.event_id, "hold") for c in candidates}
+
+
+@pytest.mark.pg
+def test_curate_pending_passes_learned_demand_to_ranker(pg_engine):
+    from newsroom.analyze.demand import store_demand
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        ev = Event(status="confirmed", risk_level="low", rubric="politics", title="Подія",
+                   significance=0.8, first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        eid = ev.id
+        store_demand(s, {"politics": 0.9, "sport": 0.1})   # learned demand index
+        s.commit()
+
+    ranker = FakeRanker({eid: "publish"})
+    curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
+    assert ranker.candidates and ranker.candidates[0].demand == pytest.approx(0.9)   # demand attached
 
 
 @pytest.mark.pg

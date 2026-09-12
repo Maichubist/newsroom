@@ -54,6 +54,17 @@ class Candidate:
     risk_level: str | None = None
     significance: float | None = None
     facts: list[str] = field(default_factory=list)
+    demand: float | None = None        # learned audience demand for the topic (0..1), or None
+
+
+def _demand_label(demand: float | None) -> str:
+    if demand is None:
+        return "невідомо"
+    if demand >= 0.66:
+        return "високий"
+    if demand >= 0.33:
+        return "середній"
+    return "низький"
 
 
 def parse_ranking(raw: str | None, valid_ids: set[int]) -> dict[int, str]:
@@ -94,13 +105,18 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 справді варте публікації просто зараз, а що — ні. Будь вибагливим: краще менше, але
 вагоме. Це не стрічка всього підряд.
 
-ПУБЛІКУВати (publish) — подія має суспільну вагу для українського читача: політика,
-безпека/фронт, економіка, важливі рішення, помітні міжнародні події, що нас
-стосуються, резонансні суспільні історії.
-ПРИТРИМАти (hold) — дрібне, вузьконішеве, прохідне, дубль уже відомого, суто
-розважальне без ширшого значення.
+Зважуй ДВА рівнозначні чинники:
+- ВАЖЛИВІСТЬ: суспільна вага для українського читача (політика, безпека/фронт,
+  економіка, важливі рішення, помітні міжнародні події, що нас стосуються).
+- ПОПИТ АУДИТОРІЇ: наскільки тема цікавить масового читача («попит» біля кандидата —
+  вивчений із реакцій на схожі новини в інших каналах). Важливе, але буденне (щоденні
+  зведення роками) читач гортає повз; свіже й резонансне — читає.
 
-Порівнюй кандидатів між собою: якщо подія слабша за решту в списку — hold.
+ПРИТРИМАти (hold) — дрібне, вузьконішеве, прохідне, дубль уже відомого, суто
+розважальне без ширшого значення, або важливе-але-рутинне з низьким попитом.
+
+Порівнюй кандидатів між собою: якщо подія слабша за решту в списку і за важливістю, і
+за попитом — hold.
 
 Поверни лише JSON: {"decisions": [{"id": <число>, "decision": "publish|hold"}, ...]}
 для КОЖНОГО кандидата.
@@ -112,7 +128,8 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 def _render_candidates(candidates: list[Candidate]) -> str:
     lines: list[str] = []
     for c in candidates:
-        head = f"[id={c.event_id}] ({c.rubric or '?'}/{c.risk_level or '?'}) {c.title.strip()}"
+        head = (f"[id={c.event_id}] ({c.rubric or '?'}/{c.risk_level or '?'}, "
+                f"попит: {_demand_label(c.demand)}) {c.title.strip()}")
         lines.append(head)
         for f in c.facts[:3]:
             if f and f.strip():
@@ -186,6 +203,8 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
     if significance_threshold is not None:
         conditions.append(Event.significance >= significance_threshold)
 
+    from newsroom.analyze.demand import load_demand
+
     with session_factory() as s:
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
@@ -203,6 +222,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             .where(EventItem.event_id.in_(event_ids), Source.is_official.is_(True))
             .distinct()
         ).scalars().all())
+        demand_by_rubric = load_demand(s)      # learned audience demand per rubric ({} until data)
 
     decisions: dict[int, str] = {}
     to_rank: list[Candidate] = []
@@ -211,7 +231,8 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             decisions[eid] = CURATE_PUBLISH
         else:
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
-                                     significance=sig, facts=_facts_brief(fact_base)))
+                                     significance=sig, facts=_facts_brief(fact_base),
+                                     demand=demand_by_rubric.get(rubric) if rubric else None))
     must_count = len(decisions)
 
     if to_rank:
