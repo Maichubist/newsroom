@@ -12,5 +12,8 @@ version: "0.1"
 urgent_per_hour: 6
 rumors_per_day: 8
 surge_window_minutes: 30
-surge_max_same_rubric: 5
+# Бекстоп проти сплеску-атаки, а не інструмент обсягу: обсяг тримає regular_per_hour,
+# тож surge має спрацьовувати лише на аномалії. За 5 він тримав нормальний потік
+# однорубричних новин як «атаку»; 10 лишає бекстоп, але не ріже звичайні новини.
+surge_max_same_rubric: 10
 regular_per_hour: 8
