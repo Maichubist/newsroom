@@ -26,6 +26,13 @@ def test_material_without_facts_falls_back_to_title_and_source():
     assert "Факти" not in material          # no facts section when there are none
 
 
+def test_material_includes_rubric_for_register():
+    ctx = GenerationContext(title="Шахтар зіграв внічию", rubrics=["sport"],
+                            source_excerpt="Матч завершився 1:1.")
+    material = build_material(ctx)
+    assert "Рубрика: sport" in material          # register guidance so the model tunes the voice
+
+
 def test_material_empty_context_is_empty():
     assert build_material(GenerationContext(title="")) == ""
 

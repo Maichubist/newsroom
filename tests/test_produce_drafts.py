@@ -24,8 +24,8 @@ class FakeGenerator:
     model = "fake-gen"
 
     def generate(self, ctx, *, feedback=None):
-        return DraftContent(headline=ctx.title or "Новина", lead="Суть події тут.",
-                            what_it_means="Наслідок.")
+        return DraftContent(headline=ctx.title or "Новина",
+                            body="Суть події тут, з конкретикою.")
 
 
 def _event(pg_engine, *, status: str, title: str, update_type: str | None = None) -> int:
@@ -47,7 +47,7 @@ class RecordingGenerator:
 
     def generate(self, ctx, *, feedback=None):
         self.contexts.append(ctx)
-        return DraftContent(headline=ctx.title or "Новина", lead="Суть.", what_it_means="Наслідок.")
+        return DraftContent(headline=ctx.title or "Новина", body="Суть події, конкретно і по факту.")
 
 
 def test_produce_feeds_fact_base_and_source_into_generator(pg_engine):

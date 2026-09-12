@@ -65,10 +65,14 @@ class EditorialPipeline:
                 .distinct()
             ).scalars().all())
             title = event.title or ""
+            risk_level = event.risk_level
             facts = _facts_from_base(event.fact_base)
             source_excerpt = _source_excerpt(s, event_id)
 
         is_rumor = status == "rumor"
+        # show "Повідомляють:" only where the confidence level matters — a
+        # single-source high/critical item — not on routine reported news.
+        reported = status == "reported" and risk_level in ("high", "critical")
         ctx = GenerationContext(title=title, summary=summary, rubrics=rubrics, status=status,
                                 facts=facts, source_excerpt=source_excerpt)
 
@@ -80,7 +84,7 @@ class EditorialPipeline:
             self._journal_generation_failed(event_id)
             return ProduceResult(None, False, ["generation_failed"], [], False)
 
-        post, report = self._compose_and_check(draft, status, is_rumor, hashtags, sources)
+        post, report = self._compose_and_check(draft, reported, is_rumor, hashtags, sources)
 
         regenerated = False
         if not report.ok or report.soft:
@@ -88,7 +92,7 @@ class EditorialPipeline:
             retry = self.generator.generate(ctx, feedback=feedback)
             if content_is_publishable(retry):        # keep the good first draft if the retry failed
                 draft = retry
-                post, report = self._compose_and_check(draft, status, is_rumor, hashtags, sources)
+                post, report = self._compose_and_check(draft, reported, is_rumor, hashtags, sources)
             regenerated = True
 
         pub_id = self._store_draft(event_id, draft.headline, post, status, is_rumor,
@@ -118,8 +122,8 @@ class EditorialPipeline:
             ))
             s.commit()
 
-    def _compose_and_check(self, draft, status, is_rumor, hashtags, sources):
-        post = compose_post(draft, status=status, is_rumor=is_rumor, hashtags=hashtags, sources=sources)
+    def _compose_and_check(self, draft, reported, is_rumor, hashtags, sources):
+        post = compose_post(draft, is_rumor=is_rumor, reported=reported, hashtags=hashtags, sources=sources)
         report = critic_check(post, is_rumor=is_rumor, stoplist_rules=self.stoplist_rules,
                               ai_accent_patterns=self.ai_accent_patterns)
         return post, report

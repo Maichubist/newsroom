@@ -31,7 +31,7 @@ class FakeGenerator:
         self.feedback_calls.append(feedback)
         return self._drafts.pop(0) if self._drafts else self._drafts_last
 
-    _drafts_last = DraftContent(headline="Fallback", lead="Fallback lead.")
+    _drafts_last = DraftContent(headline="Fallback", body="Fallback body text.")
 
 
 def _event(pg_engine, *, rubric="politics", status="confirmed", title="Подія", hashtag=None) -> int:
@@ -62,8 +62,8 @@ def _pub(pg_engine, event_id):
 
 def test_clean_draft_is_stored_and_passes(pg_engine):
     eid = _event(pg_engine, hashtag="#політика")
-    gen = FakeGenerator([DraftContent(headline="НБУ знизив ставку", lead="Ставка — 13%.",
-                                      what_it_means="Дешевші кредити.")])
+    gen = FakeGenerator([DraftContent(headline="НБУ знизив ставку",
+                                      body="Ставку знижено до 13% — дешевші кредити.")])
     pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
                              stoplist_rules=STOP, ai_accent_patterns=ACCENT)
     r = pipe.produce(eid)
@@ -71,15 +71,15 @@ def test_clean_draft_is_stored_and_passes(pg_engine):
     assert r.critic_ok is True and r.regenerated is False and len(gen.feedback_calls) == 1
     pub = _pub(pg_engine, eid)
     assert pub.status == "draft" and pub.headline == "НБУ знизив ставку"
-    assert "Що це означає: Дешевші кредити." in pub.body
+    assert "Ставку знижено до 13% — дешевші кредити." in pub.body
     assert pub.features["critic_ok"] is True and pub.model == "fake-gen"
 
 
 def test_ai_accent_triggers_one_regeneration(pg_engine):
     eid = _event(pg_engine)
     gen = FakeGenerator([
-        DraftContent(headline="Ставка", lead="Таким чином, ставку знижено."),   # soft ai_accent
-        DraftContent(headline="Ставка", lead="Ставку знижено до 13%."),          # clean
+        DraftContent(headline="Ставка", body="Таким чином, ставку знижено."),   # soft ai_accent
+        DraftContent(headline="Ставка", body="Ставку знижено до 13% сьогодні."),  # clean
     ])
     pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
                              stoplist_rules=STOP, ai_accent_patterns=ACCENT)
@@ -91,7 +91,7 @@ def test_ai_accent_triggers_one_regeneration(pg_engine):
 
 def test_stoplist_block_stored_but_flagged(pg_engine):
     eid = _event(pg_engine, rubric="war", status="confirmed", title="Атака")
-    block = DraftContent(headline="Атака", lead="Шахеди курсом на Київ.")
+    block = DraftContent(headline="Атака", body="Шахеди курсом на Київ увечері.")
     gen = FakeGenerator([block, block])  # still blocked after regenerate
     pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
                              stoplist_rules=STOP, ai_accent_patterns=ACCENT)
@@ -106,7 +106,7 @@ def test_fallback_generation_stores_no_draft_and_holds(pg_engine):
     # when the generator only produces a fallback (e.g. the LLM 429'd), no post is
     # stored — the event stays undrafted for the next tick, and the miss is journaled
     eid = _event(pg_engine, title="Подія без тексту")
-    fb = DraftContent(headline="Новина", lead="Новина", fallback=True)
+    fb = DraftContent(headline="Новина", body="Новина", fallback=True)
     gen = FakeGenerator([fb, fb, fb])
     pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
                              stoplist_rules=STOP, ai_accent_patterns=ACCENT)
@@ -125,8 +125,8 @@ def test_transient_first_failure_recovers_on_retry(pg_engine):
     # first attempt fell back, second attempt is real content -> a draft is stored
     eid = _event(pg_engine, title="Подія що відновилась")
     gen = FakeGenerator([
-        DraftContent(headline="X", lead="Y", fallback=True),
-        DraftContent(headline="Справжній заголовок", lead="Справжній конкретний лід події."),
+        DraftContent(headline="X", body="Y", fallback=True),
+        DraftContent(headline="Справжній заголовок", body="Справжній конкретний текст події."),
     ])
     pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
                              stoplist_rules=STOP, ai_accent_patterns=ACCENT)
