@@ -243,6 +243,39 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
     assert p3.calls[0][0] == "sendPhoto" and p3.calls[0][1]["photo"] == "http://x/pic.jpg"
 
 
+def test_publish_caps_regular_posts_and_prefers_significant(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+    from newsroom.publishers.gate import Limits
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=Limits(regular_per_hour=2))
+
+    made = {}
+    with Session(pg_engine) as s:
+        for sig in (0.30, 0.90, 0.70):        # inserted out of order; publishing must sort by significance
+            ev = Event(status="confirmed", risk_level="low", rubric="economy", title=f"e{sig}",
+                       significance=sig, first_seen_at=dt.datetime.now(UTC))
+            s.add(ev)
+            s.flush()
+            pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                              headline=f"H{sig}", body=f"Новина {sig} з конкретикою.",
+                              features={"critic_ok": True, "is_rumor": False})
+            s.add(pub)
+            s.flush()
+            made[sig] = pub.id
+        s.commit()
+
+    stats = publisher.publish_pending(limit=50)
+    assert stats["published"] == 2 and stats["blocked"] == 1
+    with Session(pg_engine) as s:
+        assert s.get(Publication, made[0.90]).status == "published"   # top two by significance go out
+        assert s.get(Publication, made[0.70]).status == "published"
+        assert s.get(Publication, made[0.30]).status == "draft"       # least significant deferred by the cap
+
+
 def test_story_second_post_replies_to_first(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Event, Publication, Story

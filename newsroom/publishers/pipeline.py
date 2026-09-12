@@ -104,6 +104,13 @@ class Publisher:
             .where(Publication.status == "published", Publication.published_at >= now - dt.timedelta(days=1),
                    _Event.status == "rumor")
         ) or 0)
+        # normal posts in the last hour, for the general firehose cap: neither
+        # critical (own urgent limit) nor rumor (own daily limit) are counted
+        regular_last_hour = int(s.scalar(
+            select(func.count()).select_from(Publication).join(_Event, _Event.id == Publication.event_id)
+            .where(Publication.status == "published", Publication.published_at >= now - dt.timedelta(hours=1),
+                   _Event.risk_level.is_distinct_from("critical"), _Event.status != "rumor")
+        ) or 0)
         surge_same_rubric = 0
         if rubric:
             surge_same_rubric = int(s.scalar(
@@ -124,6 +131,7 @@ class Publisher:
             urgent_last_hour=urgent_last_hour,
             rumors_last_day=rumors_last_day,
             surge_same_rubric=surge_same_rubric,
+            regular_last_hour=regular_last_hour,
         )
 
     def publish_one(self, publication_id: int) -> PublishOutcome:
@@ -281,23 +289,26 @@ class Publisher:
     def publish_pending(self, *, limit: int = 25) -> dict[str, int]:
         """One publish tick: attempt every critic-passed draft post. If the master
         switch is off, do nothing (and touch no network)."""
-        from sqlalchemy import select
+        from sqlalchemy import func, select
 
-        from newsroom.models import Publication
+        from newsroom.models import Event, Publication
 
         if not self.telegram.is_enabled():
             return {"published": 0, "blocked": 0, "disabled": 1}
 
         with self.sf() as s:
+            # most-significant first, so when the hourly cap fills it keeps the best
+            # posts and defers the rest (unscored significance sorts last as 0)
             ids = list(s.execute(
                 select(Publication.id)
+                .join(Event, Event.id == Publication.event_id)
                 .where(
                     Publication.status == "draft",
                     Publication.kind == "post",
                     Publication.event_id.is_not(None),
                     Publication.features["critic_ok"].as_boolean().is_(True),
                 )
-                .order_by(Publication.id)
+                .order_by(func.coalesce(Event.significance, 0.0).desc(), Publication.id)
                 .limit(limit)
             ).scalars().all())
 

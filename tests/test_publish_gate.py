@@ -23,6 +23,7 @@ LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30, su
 def test_load_limits_from_config():
     lim = load_limits(CONFIG / "limits.yaml")
     assert lim.urgent_per_hour >= 1 and lim.rumors_per_day >= 1 and lim.surge_max_same_rubric >= 1
+    assert lim.regular_per_hour >= 1
 
 
 # --- evaluate_gate: happy path ------------------------------------------------
@@ -84,6 +85,29 @@ def test_gate_rumor_rate_limit():
 def test_gate_surge_detection():
     hit = evaluate_gate(GateInputs(risk_level="high", surge_same_rubric=5), LIMITS)
     assert "surge" in hit.reasons and not hit.allow
+
+
+def test_gate_regular_post_rate_limit():
+    ok = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", regular_last_hour=7), LIMITS)
+    hit = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", regular_last_hour=8), LIMITS)
+    assert ok.allow is True and "post_rate_limit" in hit.reasons and not hit.allow
+
+
+def test_gate_post_rate_limit_excludes_urgent_and_rumor():
+    # breaking (critical) news is never held by the general firehose cap
+    urgent = evaluate_gate(GateInputs(critic_ok=True, risk_level="critical",
+                                      has_official_source=True, regular_last_hour=50), LIMITS)
+    assert "post_rate_limit" not in urgent.reasons and urgent.allow is True
+    # a labelled rumor is governed by the rumor limit, not the general cap
+    rumor = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", is_rumor=True,
+                                     rumor_labeled=True, regular_last_hour=50), LIMITS)
+    assert "post_rate_limit" not in rumor.reasons
+
+
+def test_gate_regular_cap_disabled_when_zero():
+    limits = Limits(regular_per_hour=0)
+    d = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", regular_last_hour=99), limits)
+    assert "post_rate_limit" not in d.reasons
 
 
 def test_gate_reasons_are_deduped_and_sorted():

@@ -35,6 +35,7 @@ class Limits:
     rumors_per_day: int = 8
     surge_window_minutes: int = 30
     surge_max_same_rubric: int = 5
+    regular_per_hour: int = 8          # general firehose cap: normal posts/hour (0 = off)
 
 
 def load_limits(path: str | Path) -> Limits:
@@ -48,6 +49,7 @@ def load_limits(path: str | Path) -> Limits:
             rumors_per_day=int(data.get("rumors_per_day", 8)),
             surge_window_minutes=int(data.get("surge_window_minutes", 30)),
             surge_max_same_rubric=int(data.get("surge_max_same_rubric", 5)),
+            regular_per_hour=int(data.get("regular_per_hour", 8)),
         )
     except (TypeError, ValueError) as exc:
         raise LimitsConfigError(f"bad limits value: {exc}") from exc
@@ -65,6 +67,7 @@ class GateInputs:
     urgent_last_hour: int = 0
     rumors_last_day: int = 0
     surge_same_rubric: int = 0
+    regular_last_hour: int = 0              # normal (non-critical, non-rumor) posts in the last hour
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,11 @@ def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
         reasons.append("urgent_rate_limit")
     if inputs.is_rumor and inputs.rumors_last_day >= limits.rumors_per_day:
         reasons.append("rumor_rate_limit")
+    # general firehose cap: normal posts only (urgent/critical and rumors have their
+    # own limits and are never counted here, so breaking news is never held by it)
+    regular = not critical and not inputs.is_rumor
+    if regular and limits.regular_per_hour > 0 and inputs.regular_last_hour >= limits.regular_per_hour:
+        reasons.append("post_rate_limit")
 
     # --- surge / possible attack (hold) ---
     if inputs.surge_same_rubric >= limits.surge_max_same_rubric:
