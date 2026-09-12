@@ -395,10 +395,15 @@ class TelegramCollector:
         seed = int(os.getenv("TELEGRAM_SEED_LIMIT", "30"))
         max_backfill = int(os.getenv("TELEGRAM_MAX_BACKFILL", "500"))
         for sid, handle in sources:
-            entity = await client.get_entity(handle)
-            await self.backfill_source(client, sid, peer=entity,
-                                       channel_username=handle.lstrip("@"),
-                                       first_seed_limit=seed, max_backfill=max_backfill)
+            # One channel the account cannot resolve (not subscribed, private, wrong
+            # handle) must not abort backfill for the rest.
+            try:
+                entity = await client.get_entity(handle)
+                await self.backfill_source(client, sid, peer=entity,
+                                           channel_username=handle.lstrip("@"),
+                                           first_seed_limit=seed, max_backfill=max_backfill)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("telegram backfill skipped", extra={"handle": handle, "error": str(exc)})
 
         async def _album_ticker():
             while True:
