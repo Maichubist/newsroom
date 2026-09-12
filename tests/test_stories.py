@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from newsroom.analyze.stories import StoryLinker, mark_dormant, slugify
+from newsroom.analyze.stories import StoryLinker, link_pending, mark_dormant, slugify
 from newsroom.db import make_session_factory
 from newsroom.db.base import EMBEDDING_DIM
 from newsroom.models import Event, Story, StoryVersion
@@ -85,6 +85,24 @@ def test_hashtag_appears_after_three_events(pg_engine):
         story_id = r.story_id
     with Session(pg_engine) as s:
         assert s.get(Story, story_id).hashtag == "#politics"
+
+
+def test_link_pending_links_unlinked_and_merges_similar(pg_engine):
+    sf = make_session_factory(pg_engine)
+    # two near-identical events (should share one story) + one distinct event
+    _event(pg_engine, _vec(30, 31, 32), title="Матч А")
+    _event(pg_engine, _vec(30, 31, 32), title="Матч А (передрук)")
+    _event(pg_engine, _vec(150, 151), title="Інша тема")
+
+    stats = link_pending(sf, StoryLinker(sf, threshold=0.80), limit=50)
+    assert stats["linked"] == 3 and stats["new_stories"] == 2   # two similar merged into one story
+
+    with Session(pg_engine) as s:
+        assert s.scalar(select(func.count()).select_from(Event).where(Event.story_id.is_(None))) == 0
+        assert s.scalar(select(func.count()).select_from(Story)) == 2
+
+    # idempotent: nothing left to link on a second tick
+    assert link_pending(sf, StoryLinker(sf), limit=50)["linked"] == 0
 
 
 def test_mark_dormant(pg_engine):

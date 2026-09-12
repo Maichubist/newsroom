@@ -11,10 +11,13 @@ Lifecycle: new -> developing -> stable -> dormant (N days idle) -> closed.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
 from dataclasses import dataclass
 
 from newsroom.analyze.clustering import best_match, update_centroid
+
+log = logging.getLogger("newsroom.analyze.stories")
 
 DEFAULT_STORY_THRESHOLD = 0.80          # looser than event clustering (longer window)
 DEFAULT_STORY_WINDOW_HOURS = 24 * 14    # 14 days
@@ -98,6 +101,39 @@ class StoryLinker:
             s.add(StoryVersion(story_id=story.id, version=1, reason_event_id=event_id))
             s.commit()
             return StoryAssignResult(story.id, True, float(sim), 1)
+
+
+def link_pending(session_factory, linker: "StoryLinker", *, limit: int = 50) -> dict[str, int]:
+    """One story-linking tick (architecture §7): attach every clustered event that
+    has a centroid but no story yet to a story — an existing one by vector
+    similarity in the 14-day window, or a new one. This is the step that lets
+    near-identical events share a story (so the update classifier can mark the
+    repeats summary-only instead of posting each) and lets story posts reply-chain.
+    A poison event is skipped, not allowed to block the queue."""
+    from sqlalchemy import select
+
+    from newsroom.models import Event
+
+    with session_factory() as s:
+        ids = list(s.execute(
+            select(Event.id)
+            .where(Event.story_id.is_(None), Event.centroid.is_not(None))
+            .order_by(Event.id)
+            .limit(limit)
+        ).scalars().all())
+
+    stats = {"linked": 0, "new_stories": 0, "errors": 0}
+    for event_id in ids:
+        try:
+            result = linker.assign(event_id)
+        except Exception:  # noqa: BLE001 - one bad event must not stall linking
+            log.exception("story link failed", extra={"event_id": event_id})
+            stats["errors"] += 1
+            continue
+        stats["linked"] += 1
+        if result.created_new:
+            stats["new_stories"] += 1
+    return stats
 
 
 def mark_dormant(session_factory, *, dormant_days: int = DEFAULT_DORMANT_DAYS) -> int:

@@ -40,6 +40,10 @@ def factcheck_enabled() -> bool:
     return os.getenv("FACTCHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def stories_enabled() -> bool:
+    return os.getenv("STORIES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def story_updates_enabled() -> bool:
     return os.getenv("STORY_UPDATES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -215,6 +219,32 @@ async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 3
                 log.info("factcheck tick", extra=bind(**stats))
         except Exception:
             log.exception("factcheck tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+def build_story_linker_from_env(session_factory):
+    """Assemble the story linker (§7). Pure vector similarity — no LLM."""
+    from newsroom.analyze.stories import StoryLinker
+
+    return StoryLinker(session_factory)
+
+
+async def stories_forever(session_factory, linker, *, tick_seconds: float = 30.0,
+                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Link each clustered event to a story (§7) and age idle stories to dormant.
+    Runs before story-updates and editorial, so near-identical events share a
+    story (repeats become summary-only, not duplicate posts) and story posts can
+    reply-chain. Nothing is published."""
+    from newsroom.analyze.stories import link_pending, mark_dormant
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(link_pending, session_factory, linker)
+            dormant = await asyncio.to_thread(mark_dormant, session_factory)
+            if stats.get("linked") or dormant:
+                log.info("story-link tick", extra=bind(dormant=dormant, **stats))
+        except Exception:
+            log.exception("story-link tick failed")
         await asyncio.sleep(tick_seconds)
 
 
@@ -501,6 +531,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("media moderation enabled")
     else:
         log.info("media moderation disabled (MEDIA_MODERATION_ENABLED off)")
+
+    if stories_enabled():
+        linker = build_story_linker_from_env(session_factory)
+        tasks.append(asyncio.create_task(stories_forever(session_factory, linker)))
+        log.info("story linking enabled")
+    else:
+        log.info("story linking disabled (STORIES_ENABLED off)")
 
     if story_updates_enabled():
         updater = build_story_updater_from_env(session_factory)
