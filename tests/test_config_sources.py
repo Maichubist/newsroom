@@ -21,8 +21,8 @@ def test_real_sources_yaml_is_valid():
     # every (kind, handle) pair is unique
     keys = {(s.kind, s.handle_or_url) for s in sources}
     assert len(keys) == len(sources)
-    # the 25-feed RSS bootstrap stays intact
-    assert sum(s.kind == "rss" for s in sources) == 25
+    # the RSS bootstrap stays intact (grows as the list is curated)
+    assert sum(s.kind == "rss" for s in sources) >= 25
     # official RSS agencies stay flagged
     official = {s.name for s in sources if s.tier == "official"}
     assert {"Укрінформ", "Суспільне", "КМДА (Київ)"}.issubset(official)

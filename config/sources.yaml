@@ -39,6 +39,12 @@ sources:
   - {name: "LB.ua", kind: rss, handle_or_url: "https://lb.ua/rss", origin: ua, lang: uk, tier: media}
   - {name: "Бабель", kind: rss, handle_or_url: "https://babel.ua/rss", origin: ua, lang: uk, tier: media}
   - {name: "ZN.UA", kind: rss, handle_or_url: "https://zn.ua/ukr/rss", origin: ua, lang: uk, tier: media}
+  # Агенції та джерела цитат/першоджерел (звірені: фіди робочі, вер. 2026)
+  - {name: "Інтерфакс-Україна", kind: rss, handle_or_url: "https://ua.interfax.com.ua/news/last.rss", origin: ua, lang: uk, tier: media}
+  - {name: "РБК-Україна", kind: rss, handle_or_url: "https://www.rbc.ua/static/rss/all.ukr.rss.xml", origin: ua, lang: uk, tier: media}
+  - {name: "Слово і Діло", kind: rss, handle_or_url: "https://www.slovoidilo.ua/rss.xml", origin: ua, lang: uk, tier: media}
+  - {name: "Радіо Свобода", kind: rss, handle_or_url: "https://www.radiosvoboda.org/api/zrqiteuuir", origin: ua, lang: uk, tier: media}
+  - {name: "Детектор медіа", kind: rss, handle_or_url: "https://detector.media/rss/", origin: ua, lang: uk, tier: media}
 
   # ---------------- Світові ----------------
   - {name: "BBC World", kind: rss, handle_or_url: "https://feeds.bbci.co.uk/news/world/rss.xml", origin: world, lang: en, tier: media}
@@ -54,6 +60,21 @@ sources:
   - {name: "MIT Technology Review", kind: rss, handle_or_url: "https://www.technologyreview.com/feed/", origin: world, lang: en, tier: media}
   - {name: "VentureBeat AI", kind: rss, handle_or_url: "https://venturebeat.com/category/ai/feed/", origin: world, lang: en, tier: media}
   - {name: "Defense News", kind: rss, handle_or_url: "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", origin: world, lang: en, tier: media}
+
+  # --- Офіційні держ/військові Telegram-канали (is_official) ---
+  # Хендли звірені веб-пошуком (вер. 2026). Це першоджерела для критичних тем
+  # (війна/оборона): за хартією 3.1 саме official-джерело відкриває gate для таких
+  # тем. Акаунт-збирач має могти їх резолвити/приєднатися; Telegram обмежує кількість
+  # каналів на акаунт — вимикай зайві (active: false) за потреби.
+  - {name: "Генеральний штаб ЗСУ", kind: telegram, handle_or_url: "@GeneralStaffZSU", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Повітряні Сили ЗСУ", kind: telegram, handle_or_url: "@kpszsu", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Сухопутні війська ЗСУ", kind: telegram, handle_or_url: "@landforcesofukraine", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Військово-Морські Сили ЗСУ", kind: telegram, handle_or_url: "@ukrainian_navy", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Міністерство оборони України", kind: telegram, handle_or_url: "@ministry_of_defense_ua", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Офіс Президента", kind: telegram, handle_or_url: "@OP_UA", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Володимир Зеленський", kind: telegram, handle_or_url: "@V_Zelenskiy_official", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Михайло Драпатий (командувач СВ)", kind: telegram, handle_or_url: "@Drapatyi_KSV", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Мінцифри / Михайло Федоров", kind: telegram, handle_or_url: "@zedigital", origin: ua, lang: uk, tier: official, is_official: true}
 
   # --- Telegram channels (auto-imported, then curated) ---
   # Жоден із цих каналів не є офіційним держджерелом (tier: official). Новинні
