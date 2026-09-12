@@ -57,13 +57,8 @@ class EditorialPipeline:
             rubrics = [event.rubric] if event.rubric else []
             status = event.status or "confirmed"
             hashtags = _hashtags(event.rubric, story.hashtag if story else None)
-            sources = list(s.execute(
-                select(Source.name)
-                .join(Item, Item.source_id == Source.id)
-                .join(EventItem, EventItem.item_id == Item.id)
-                .where(EventItem.event_id == event_id)
-                .distinct()
-            ).scalars().all())
+            source_links = _source_links(s, event_id)
+            sources = [name for name, _ in source_links]
             title = event.title or ""
             risk_level = event.risk_level
             facts = _facts_from_base(event.fact_base)
@@ -95,8 +90,20 @@ class EditorialPipeline:
                 post, report = self._compose_and_check(draft, reported, is_rumor, hashtags, sources)
             regenerated = True
 
+        # Telegram-specific presentation is rendered at send time from these pieces
+        # (a bold headline, linked sources); pub.body stays plain for the critic,
+        # the shadow report and other channels.
+        render = {
+            "headline": draft.headline,
+            "body": draft.body,
+            "watching": draft.watching,
+            "hashtags": hashtags,
+            "source_links": [[name, url] for name, url in source_links],
+            "is_rumor": is_rumor,
+            "reported": reported,
+        }
         pub_id = self._store_draft(event_id, draft.headline, post, status, is_rumor,
-                                   rubrics, hashtags, report)
+                                   rubrics, hashtags, report, render)
         return ProduceResult(pub_id, report.ok, report.hard, report.soft, regenerated)
 
     # ------------------------------------------------------------------
@@ -128,7 +135,8 @@ class EditorialPipeline:
                               ai_accent_patterns=self.ai_accent_patterns)
         return post, report
 
-    def _store_draft(self, event_id, headline, body, status, is_rumor, rubrics, hashtags, report) -> int:
+    def _store_draft(self, event_id, headline, body, status, is_rumor, rubrics, hashtags, report,
+                     render=None) -> int:
         from newsroom.models import Decision, Publication
 
         features = {
@@ -140,6 +148,7 @@ class EditorialPipeline:
             "critic_ok": report.ok,
             "critic_hard": report.hard,
             "critic_soft": report.soft,
+            "render": render,
         }
         with self.sf() as s:
             pub = Publication(
@@ -234,6 +243,29 @@ def _source_excerpt(s, event_id: int, *, max_chars: int = 2000) -> str:
         if piece:
             chunks.append(piece)
     return "\n\n".join(chunks)[:max_chars].strip()
+
+
+def _source_links(s, event_id: int) -> list[tuple[str, str | None]]:
+    """Each distinct source name for the event, paired with one article URL (the
+    first non-null item.url from that source), so the post can link the source
+    name instead of printing a "Джерела:" line. Preserves first-seen order."""
+    from sqlalchemy import select
+
+    from newsroom.models import EventItem, Item, Source
+
+    rows = s.execute(
+        select(Source.name, Item.url)
+        .join(Item, Item.source_id == Source.id)
+        .join(EventItem, EventItem.item_id == Item.id)
+        .where(EventItem.event_id == event_id)
+    ).all()
+    link_by_name: dict[str, str | None] = {}
+    for name, url in rows:
+        if not name:
+            continue
+        if name not in link_by_name or (link_by_name[name] is None and url):
+            link_by_name[name] = url
+    return list(link_by_name.items())
 
 
 def _hashtags(rubric: str | None, story_hashtag: str | None) -> list[str]:

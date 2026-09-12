@@ -37,6 +37,26 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+def _render_send_body(pub) -> str:
+    """The text actually sent to Telegram: HTML rendered from the stored pieces
+    (bold headline, linked sources) when present, else the plain pub.body. Gate
+    and stop-list checks still run on the plain body, never on this."""
+    render = (pub.features or {}).get("render")
+    if isinstance(render, dict):
+        from newsroom.publishers.format import render_telegram_html
+
+        return render_telegram_html(
+            headline=render.get("headline") or pub.headline or "",
+            body=render.get("body") or "",
+            watching=render.get("watching") or "",
+            hashtags=render.get("hashtags") or [],
+            source_links=[tuple(x) for x in (render.get("source_links") or [])],
+            is_rumor=bool(render.get("is_rumor")),
+            reported=bool(render.get("reported")),
+        )
+    return pub.body or ""
+
+
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, charter_version: str = "0.2"):
@@ -118,7 +138,7 @@ class Publisher:
                 return PublishOutcome(publication_id, skipped=True)
             event = s.get(Event, pub.event_id) if pub.event_id else None
             inputs = self._gather_inputs(s, pub, event)
-            body = pub.body or ""
+            body = _render_send_body(pub)
             media_choice = self._media_choice(s, pub.event_id)
             reply_to_pub_id, reply_to_message_id = self._story_reply_target(s, event)
 

@@ -121,6 +121,41 @@ def test_fallback_generation_stores_no_draft_and_holds(pg_engine):
         assert dec.stage == "edit"
 
 
+def test_render_payload_captures_source_link(pg_engine):
+    # the draft stores render pieces (bold headline + linked source) with a URL
+    # pulled from the event's item, so the publisher can render Telegram HTML
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        story = Story(slug="s-link", title="Лінк", state="developing", rubric="economy", last_event_at=now)
+        s.add(story)
+        s.flush()
+        ev = Event(status="confirmed", rubric="economy", title="Подія з лінком",
+                   story_id=story.id, first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        src = Source(kind="rss", handle_or_url="cens", name="Цензор.НЕТ", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="l1", content_hash="l1".ljust(64, "0"),
+                  url="https://censor.net/news/1", title="t", text="текст")
+        s.add(it)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.commit()
+        eid = ev.id
+
+    gen = FakeGenerator([DraftContent(headline="Подія з лінком", body="Конкретний текст події тут.")])
+    pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
+                             stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    pipe.produce(eid)
+
+    pub = _pub(pg_engine, eid)
+    render = pub.features["render"]
+    assert render["headline"] == "Подія з лінком"
+    assert render["source_links"] == [["Цензор.НЕТ", "https://censor.net/news/1"]]
+    assert "Джерела:" in pub.body            # plain body (for the critic/shadow) keeps the label
+
+
 def test_transient_first_failure_recovers_on_retry(pg_engine):
     # first attempt fell back, second attempt is real content -> a draft is stored
     eid = _event(pg_engine, title="Подія що відновилась")

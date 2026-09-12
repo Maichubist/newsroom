@@ -70,6 +70,38 @@ def test_publish_one_sends_and_marks_published(pg_engine):
         assert dec.decision == "published" and dec.stage == "publish"
 
 
+def test_publish_renders_bold_headline_and_source_links(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    with Session(pg_engine) as s:
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="НБУ знизив ставку", body="НБУ знизив ставку\n\nСтавку — 13%.",
+                          features={"critic_ok": True, "is_rumor": False,
+                                    "render": {"headline": "НБУ знизив ставку",
+                                               "body": "Ставку знижено до 13%.",
+                                               "watching": "", "hashtags": ["#економіка"],
+                                               "source_links": [["Цензор.НЕТ", "https://censor.net/a1"]],
+                                               "is_rumor": False, "reported": False}})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    outcome = _publisher(sf, poster).publish_one(pid)
+    assert outcome.published is True
+    sent = poster.calls[0][1]["text"]
+    assert "<b>НБУ знизив ставку</b>" in sent
+    assert '<a href="https://censor.net/a1">Цензор.НЕТ</a>' in sent
+    assert "Джерела" not in sent and poster.calls[0][1]["parse_mode"] == "HTML"
+
+
 def test_publish_pending_skips_critic_failed(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Publication
