@@ -37,7 +37,7 @@ sources:
   - {name: "Мілітарний", kind: rss, handle_or_url: "https://mil.in.ua/uk/feed/", origin: ua, lang: uk, tier: media}
   - {name: "Цензор.НЕТ", kind: rss, handle_or_url: "https://assets.censor.net/rss/censor.net/rss_uk_news.xml", origin: ua, lang: uk, tier: media}
   - {name: "LB.ua", kind: rss, handle_or_url: "https://lb.ua/rss", origin: ua, lang: uk, tier: media}
-  - {name: "Бабель", kind: rss, handle_or_url: "https://babel.ua/rss", origin: ua, lang: uk, tier: media}
+  - {name: "Бабель", kind: rss, handle_or_url: "https://babel.ua/rss.xml", origin: ua, lang: uk, tier: media}
   - {name: "ZN.UA", kind: rss, handle_or_url: "https://zn.ua/ukr/rss", origin: ua, lang: uk, tier: media}
   # Агенції та джерела цитат/першоджерел (звірені: фіди робочі, вер. 2026)
   - {name: "Інтерфакс-Україна", kind: rss, handle_or_url: "https://ua.interfax.com.ua/news/last.rss", origin: ua, lang: uk, tier: media}
