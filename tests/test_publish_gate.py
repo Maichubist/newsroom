@@ -87,27 +87,31 @@ def test_gate_surge_detection():
     assert "surge" in hit.reasons and not hit.allow
 
 
-def test_gate_regular_post_rate_limit():
-    ok = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", regular_last_hour=7), LIMITS)
-    hit = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", regular_last_hour=8), LIMITS)
-    assert ok.allow is True and "post_rate_limit" in hit.reasons and not hit.allow
+def test_gate_regular_post_pacing():
+    # LIMITS.regular_per_hour defaults to 8 -> one normal post per 450s
+    paced = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=100.0), LIMITS)
+    ok = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=500.0), LIMITS)
+    first = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=None), LIMITS)
+    assert "post_pacing" in paced.reasons and not paced.allow
+    assert ok.allow is True                    # enough time has passed
+    assert first.allow is True                 # no prior normal post -> not paced
 
 
-def test_gate_post_rate_limit_excludes_urgent_and_rumor():
-    # breaking (critical) news is never held by the general firehose cap
+def test_gate_pacing_excludes_urgent_and_rumor():
+    # breaking (critical) news is never paced by the general firehose control
     urgent = evaluate_gate(GateInputs(critic_ok=True, risk_level="critical",
-                                      has_official_source=True, regular_last_hour=50), LIMITS)
-    assert "post_rate_limit" not in urgent.reasons and urgent.allow is True
-    # a labelled rumor is governed by the rumor limit, not the general cap
+                                      has_official_source=True, seconds_since_last_regular=0.0), LIMITS)
+    assert "post_pacing" not in urgent.reasons and urgent.allow is True
+    # a labelled rumor is governed by the rumor limit, not pacing
     rumor = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", is_rumor=True,
-                                     rumor_labeled=True, regular_last_hour=50), LIMITS)
-    assert "post_rate_limit" not in rumor.reasons
+                                     rumor_labeled=True, seconds_since_last_regular=0.0), LIMITS)
+    assert "post_pacing" not in rumor.reasons
 
 
-def test_gate_regular_cap_disabled_when_zero():
+def test_gate_pacing_disabled_when_zero():
     limits = Limits(regular_per_hour=0)
-    d = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", regular_last_hour=99), limits)
-    assert "post_rate_limit" not in d.reasons
+    d = evaluate_gate(GateInputs(critic_ok=True, risk_level="low", seconds_since_last_regular=0.0), limits)
+    assert "post_pacing" not in d.reasons
 
 
 def test_gate_reasons_are_deduped_and_sorted():

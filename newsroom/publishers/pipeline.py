@@ -104,13 +104,15 @@ class Publisher:
             .where(Publication.status == "published", Publication.published_at >= now - dt.timedelta(days=1),
                    _Event.status == "rumor")
         ) or 0)
-        # normal posts in the last hour, for the general firehose cap: neither
-        # critical (own urgent limit) nor rumor (own daily limit) are counted
-        regular_last_hour = int(s.scalar(
-            select(func.count()).select_from(Publication).join(_Event, _Event.id == Publication.event_id)
-            .where(Publication.status == "published", Publication.published_at >= now - dt.timedelta(hours=1),
+        # when the last normal post went out, for pacing: neither critical (own
+        # urgent limit) nor rumor (own daily limit) count as a normal post
+        last_regular_at = s.scalar(
+            select(func.max(Publication.published_at)).select_from(Publication)
+            .join(_Event, _Event.id == Publication.event_id)
+            .where(Publication.status == "published",
                    _Event.risk_level.is_distinct_from("critical"), _Event.status != "rumor")
-        ) or 0)
+        )
+        seconds_since_last_regular = (now - last_regular_at).total_seconds() if last_regular_at else None
         surge_same_rubric = 0
         if rubric:
             surge_same_rubric = int(s.scalar(
@@ -131,7 +133,7 @@ class Publisher:
             urgent_last_hour=urgent_last_hour,
             rumors_last_day=rumors_last_day,
             surge_same_rubric=surge_same_rubric,
-            regular_last_hour=regular_last_hour,
+            seconds_since_last_regular=seconds_since_last_regular,
         )
 
     def publish_one(self, publication_id: int) -> PublishOutcome:
