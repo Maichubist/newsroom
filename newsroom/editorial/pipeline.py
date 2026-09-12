@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from newsroom.editorial.critic import critic_check
-from newsroom.editorial.draft import compose_post
+from newsroom.editorial.draft import compose_post, content_is_publishable
 from newsroom.editorial.generator import GenerationContext, Generator
 
 
@@ -72,14 +72,23 @@ class EditorialPipeline:
         ctx = GenerationContext(title=title, summary=summary, rubrics=rubrics, status=status,
                                 facts=facts, source_excerpt=source_excerpt)
 
-        draft = self.generator.generate(ctx)
+        # A generation that failed (fallback) or produced no real content must not
+        # become a post: leave the event undrafted so the next tick retries it once
+        # the model recovers (e.g. after a 429). Better a delay than a placeholder.
+        draft = self._generate_publishable(ctx)
+        if draft is None:
+            self._journal_generation_failed(event_id)
+            return ProduceResult(None, False, ["generation_failed"], [], False)
+
         post, report = self._compose_and_check(draft, status, is_rumor, hashtags, sources)
 
         regenerated = False
         if not report.ok or report.soft:
             feedback = "; ".join(report.hard + report.soft)
-            draft = self.generator.generate(ctx, feedback=feedback)
-            post, report = self._compose_and_check(draft, status, is_rumor, hashtags, sources)
+            retry = self.generator.generate(ctx, feedback=feedback)
+            if content_is_publishable(retry):        # keep the good first draft if the retry failed
+                draft = retry
+                post, report = self._compose_and_check(draft, status, is_rumor, hashtags, sources)
             regenerated = True
 
         pub_id = self._store_draft(event_id, draft.headline, post, status, is_rumor,
@@ -87,6 +96,28 @@ class EditorialPipeline:
         return ProduceResult(pub_id, report.ok, report.hard, report.soft, regenerated)
 
     # ------------------------------------------------------------------
+    def _generate_publishable(self, ctx):
+        """Generate a draft, retrying once if the first attempt is a fallback or
+        thin (a transient model failure). Returns None if both attempts are
+        unusable, so the caller can hold the event and retry next tick."""
+        for _ in (1, 2):
+            draft = self.generator.generate(ctx)
+            if content_is_publishable(draft):
+                return draft
+        return None
+
+    def _journal_generation_failed(self, event_id: int) -> None:
+        from newsroom.models import Decision
+
+        with self.sf() as s:
+            s.add(Decision(
+                entity_type="event", entity_id=str(event_id), stage="edit",
+                decision="generation_failed", reason="no publishable draft",
+                details={}, charter_version=self.charter_version,
+                prompt_version=self.prompt_version, model=getattr(self.generator, "model", None),
+            ))
+            s.commit()
+
     def _compose_and_check(self, draft, status, is_rumor, hashtags, sources):
         post = compose_post(draft, status=status, is_rumor=is_rumor, hashtags=hashtags, sources=sources)
         report = critic_check(post, is_rumor=is_rumor, stoplist_rules=self.stoplist_rules,
@@ -153,9 +184,12 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
             .limit(limit)
         ).scalars().all())
 
-    stats = {"produced": 0, "ok": 0, "flagged": 0}
+    stats = {"produced": 0, "ok": 0, "flagged": 0, "held": 0}
     for event_id in ids:
         result = pipeline.produce(event_id)
+        if result.publication_id is None:
+            stats["held"] += 1          # generation failed; no draft stored, retried next tick
+            continue
         stats["produced"] += 1
         stats["ok" if result.critic_ok else "flagged"] += 1
     return stats

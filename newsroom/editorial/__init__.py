@@ -1,4 +1,4 @@
-from newsroom.editorial.draft import DraftContent, compose_post, parse_draft
+from newsroom.editorial.draft import DraftContent, compose_post, content_is_publishable, parse_draft
 from newsroom.editorial.critic import CriticReport, critic_check
 from newsroom.editorial.generator import (
     DEFAULT_PROMPT,
@@ -23,7 +23,7 @@ from newsroom.editorial.updates import (
 )
 
 __all__ = [
-    "DraftContent", "compose_post", "parse_draft",
+    "DraftContent", "compose_post", "parse_draft", "content_is_publishable",
     "CriticReport", "critic_check",
     "Generator", "GenerationContext", "LLMGenerator", "DEFAULT_PROMPT", "build_material",
     "EditorialPipeline", "ProduceResult", "produce_drafts",

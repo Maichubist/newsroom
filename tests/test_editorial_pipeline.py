@@ -11,7 +11,7 @@ from newsroom.analyze.ai_accent import load_ai_accent
 from newsroom.analyze.stoplist import load_stoplist
 from newsroom.db import make_session_factory
 from newsroom.editorial import DraftContent, EditorialPipeline
-from newsroom.models import Event, EventItem, Item, Publication, Source, Story
+from newsroom.models import Decision, Event, EventItem, Item, Publication, Source, Story
 
 pytestmark = pytest.mark.pg
 
@@ -100,3 +100,38 @@ def test_stoplist_block_stored_but_flagged(pg_engine):
     assert r.critic_ok is False and any(h.startswith("stoplist_block") for h in r.hard)
     pub = _pub(pg_engine, eid)
     assert pub.status == "draft" and pub.features["critic_ok"] is False  # not publishable
+
+
+def test_fallback_generation_stores_no_draft_and_holds(pg_engine):
+    # when the generator only produces a fallback (e.g. the LLM 429'd), no post is
+    # stored — the event stays undrafted for the next tick, and the miss is journaled
+    eid = _event(pg_engine, title="Подія без тексту")
+    fb = DraftContent(headline="Новина", lead="Новина", fallback=True)
+    gen = FakeGenerator([fb, fb, fb])
+    pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
+                             stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    r = pipe.produce(eid)
+
+    assert r.publication_id is None and r.critic_ok is False and "generation_failed" in r.hard
+    with Session(pg_engine) as s:
+        assert s.execute(select(Publication).where(Publication.event_id == eid)).first() is None
+        dec = s.execute(
+            select(Decision).where(Decision.entity_id == str(eid), Decision.decision == "generation_failed")
+        ).scalar_one()
+        assert dec.stage == "edit"
+
+
+def test_transient_first_failure_recovers_on_retry(pg_engine):
+    # first attempt fell back, second attempt is real content -> a draft is stored
+    eid = _event(pg_engine, title="Подія що відновилась")
+    gen = FakeGenerator([
+        DraftContent(headline="X", lead="Y", fallback=True),
+        DraftContent(headline="Справжній заголовок", lead="Справжній конкретний лід події."),
+    ])
+    pipe = EditorialPipeline(make_session_factory(pg_engine), generator=gen,
+                             stoplist_rules=STOP, ai_accent_patterns=ACCENT)
+    r = pipe.produce(eid)
+
+    assert r.publication_id is not None
+    pub = _pub(pg_engine, eid)
+    assert pub.headline == "Справжній заголовок"

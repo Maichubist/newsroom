@@ -37,6 +37,20 @@ def test_unknown_size_is_allowed():
     assert c is not None
 
 
+def test_excludes_narrow_image_but_keeps_unknown_width():
+    # a known-tiny image (logo/icon) is not attached...
+    assert choose_media([MediaItem("image", "http://x/logo.png", width=120)]) is None
+    # ...but an image without a reported width is still allowed (Telegram fetches it)
+    c = choose_media([MediaItem("image", "http://x/photo.jpg", width=None)])
+    assert c is not None and c.url == "http://x/photo.jpg"
+
+
+def test_narrow_image_min_width_is_configurable():
+    items = [MediaItem("image", "http://x/i.jpg", width=300)]
+    assert choose_media(items) is None                                   # default min 400 excludes 300
+    assert choose_media(items, MediaLimits(min_image_width=200)) is not None
+
+
 # --- send_post routing (offline) ----------------------------------------------
 
 class RecordingPoster:

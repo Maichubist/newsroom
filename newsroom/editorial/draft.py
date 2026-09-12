@@ -19,6 +19,27 @@ class DraftContent:
     what_it_means: str = ""
     watching: str = ""                       # "за чим стежимо далі" (story posts)
     rubrics: list[str] = field(default_factory=list)
+    fallback: bool = False                    # True = generation failed, minimal placeholder (never publish)
+
+
+# A lead this short is not journalism — reject it so a thin generation holds and
+# retries rather than emitting a one-word post.
+MIN_LEAD_CHARS = 12
+
+
+def content_is_publishable(content: DraftContent) -> bool:
+    """A draft may become a publishable post only if it is real content: not the
+    generation fallback, with a lead that says something of its own (non-empty,
+    long enough, and not just the headline repeated). Everything else must hold
+    and retry — never publish a placeholder (§3.5)."""
+    if content.fallback:
+        return False
+    lead = content.lead.strip()
+    if len(lead) < MIN_LEAD_CHARS:
+        return False
+    if lead.casefold() == content.headline.strip().casefold():
+        return False
+    return True
 
 
 def parse_draft(raw: str | None) -> DraftContent | None:
@@ -33,6 +54,10 @@ def parse_draft(raw: str | None) -> DraftContent | None:
     headline = str(obj.get("headline") or "").strip()
     lead = str(obj.get("lead") or "").strip()
     if not headline or not lead:
+        return None
+    # A lead that just repeats the headline is a degenerate generation: treat it
+    # as unparsable so the caller retries instead of shipping the title twice.
+    if lead.casefold() == headline.casefold():
         return None
     return DraftContent(
         headline=headline,

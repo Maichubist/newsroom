@@ -120,7 +120,9 @@ class LLMGenerator:  # pragma: no cover - network
             if draft is not None:
                 return draft
             log.warning("draft unparsable", extra={"attempt": attempt})
-        # conservative fallback: minimal factual draft from the context
+        # conservative fallback: minimal factual draft from the context, marked so
+        # the pipeline never publishes it — it holds the event for the next tick
+        # (a transient failure, e.g. a 429, must not become a placeholder post).
         return DraftContent(headline=context.title or "Новина",
                             lead=context.summary or context.title or "",
-                            rubrics=context.rubrics)
+                            rubrics=context.rubrics, fallback=True)

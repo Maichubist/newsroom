@@ -22,6 +22,10 @@ VIDEO_MAX_BYTES = 20 * 1024 * 1024
 class MediaLimits:
     photo_max_bytes: int = PHOTO_MAX_BYTES
     video_max_bytes: int = VIDEO_MAX_BYTES
+    # Below this known width an image is a logo/icon/thumbnail, not a news photo —
+    # attaching it looks worse than no image. Unknown width is still allowed
+    # (Telegram fetches it), so we don't silently drop every sizeless asset.
+    min_image_width: int = 400
 
 
 @dataclass(frozen=True)
@@ -54,9 +58,19 @@ def choose_media(items: list[MediaItem], limits: MediaLimits | None = None) -> M
     if videos:
         return MediaChoice(method="sendVideo", param="video", url=videos[0].url)  # type: ignore[arg-type]
 
-    images = [i for i in items if i.kind == "image" and i.url and _within(i.size_bytes, limits.photo_max_bytes)]
+    images = [
+        i for i in items
+        if i.kind == "image" and i.url
+        and _within(i.size_bytes, limits.photo_max_bytes)
+        and _wide_enough(i.width, limits.min_image_width)
+    ]
     if images:
         widest = max(images, key=lambda i: (i.width or 0))
         return MediaChoice(method="sendPhoto", param="photo", url=widest.url)  # type: ignore[arg-type]
 
     return None
+
+
+def _wide_enough(width: int | None, min_width: int) -> bool:
+    # unknown width: allow (Telegram fetches it); known but tiny: reject as a logo/icon
+    return width is None or width >= min_width

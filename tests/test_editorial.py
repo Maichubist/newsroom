@@ -4,7 +4,13 @@ from pathlib import Path
 
 from newsroom.analyze.ai_accent import load_ai_accent
 from newsroom.analyze.stoplist import load_stoplist
-from newsroom.editorial import DraftContent, compose_post, critic_check, parse_draft
+from newsroom.editorial import (
+    DraftContent,
+    compose_post,
+    content_is_publishable,
+    critic_check,
+    parse_draft,
+)
 
 CONFIG = Path(__file__).resolve().parents[1] / "config"
 STOP = load_stoplist(CONFIG / "stoplist.yaml")
@@ -48,6 +54,29 @@ def test_parse_draft_requires_headline_and_lead():
     assert parse_draft('{"headline": "H"}') is None
     assert parse_draft("not json") is None
     assert parse_draft("[1,2]") is None
+
+
+def test_parse_draft_rejects_lead_that_repeats_headline():
+    # a lead == headline is a degenerate generation (title twice); reject so the
+    # caller retries instead of shipping it
+    assert parse_draft('{"headline": "Стефанчук став послом", "lead": "стефанчук став послом"}') is None
+
+
+# --- content_is_publishable ----------------------------------------------------
+
+def test_real_content_is_publishable():
+    assert content_is_publishable(DraftContent(headline="НБУ знизив ставку", lead="Ставку знижено до 13%.")) is True
+
+
+def test_fallback_draft_is_not_publishable():
+    # the generation fallback (headline=title, lead=title/summary, fallback=True)
+    assert content_is_publishable(DraftContent(headline="Новина", lead="Новина", fallback=True)) is False
+
+
+def test_thin_or_duplicate_lead_is_not_publishable():
+    assert content_is_publishable(DraftContent(headline="Подія", lead="")) is False          # empty
+    assert content_is_publishable(DraftContent(headline="Подія", lead="коротко")) is False    # too short
+    assert content_is_publishable(DraftContent(headline="Тема дня", lead="Тема дня")) is False  # repeats headline
 
 
 # --- critic --------------------------------------------------------------------
