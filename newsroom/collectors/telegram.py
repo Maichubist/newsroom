@@ -302,14 +302,28 @@ class TelegramCollector:
 
     # ---- backfill (client-agnostic; fake client in tests) ----
     async def backfill_source(self, client, source_id: int, *, peer=None,
-                              channel_username: str | None = None) -> int:
-        """Fetch every message above the stored cursor and ingest it. FloodWait is
-        waited out, not fatal."""
+                              channel_username: str | None = None,
+                              first_seed_limit: int = 30, max_backfill: int = 500) -> int:
+        """Ingest recent messages for a channel. FloodWait is waited out, not fatal.
+
+        A channel seen for the FIRST time (no stored cursor) is *seeded* with only the
+        most recent `first_seed_limit` posts — never its whole history, or a busy
+        aggregator would pour tens of thousands of years-old posts into the pipeline
+        (§12: we track from now on, we are not an archive). A channel with a cursor
+        catches up on posts above it, capped at `max_backfill` so a long downtime
+        cannot flood in one tick (the cursor advances, the next tick continues)."""
         with self.session_factory() as s:
             cursor = backfill_cursor(s, source_id)
 
-        async def fetch() -> list:
-            return [m async for m in client.iter_messages(peer, min_id=cursor, reverse=True)]
+        if cursor == 0:
+            async def fetch() -> list:
+                # newest-first, then chronological, so albums/order stay consistent
+                msgs = [m async for m in client.iter_messages(peer, limit=first_seed_limit, reverse=False)]
+                return list(reversed(msgs))
+        else:
+            async def fetch() -> list:
+                return [m async for m in client.iter_messages(
+                    peer, min_id=cursor, reverse=True, limit=max_backfill)]
 
         messages = await run_with_floodwait(fetch, sleeper=self._sleeper)
         for msg in messages:
@@ -378,10 +392,13 @@ class TelegramCollector:
             if sid is not None:
                 self.on_delete(sid, list(event.deleted_ids))
 
+        seed = int(os.getenv("TELEGRAM_SEED_LIMIT", "30"))
+        max_backfill = int(os.getenv("TELEGRAM_MAX_BACKFILL", "500"))
         for sid, handle in sources:
             entity = await client.get_entity(handle)
             await self.backfill_source(client, sid, peer=entity,
-                                       channel_username=handle.lstrip("@"))
+                                       channel_username=handle.lstrip("@"),
+                                       first_seed_limit=seed, max_backfill=max_backfill)
 
         async def _album_ticker():
             while True:

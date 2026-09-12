@@ -36,16 +36,20 @@ class FakeClient:
         self._flood_once = flood_once
         self.calls = 0
 
-    def iter_messages(self, peer, min_id=0, reverse=True):
+    def iter_messages(self, peer, min_id=0, reverse=True, limit=None):
         self.calls += 1
         flood = self._flood_once if (self.calls == 1 and self._flood_once) else None
+        msgs = [m for m in sorted(self._messages, key=lambda x: x.id) if m.id > min_id]
+        if not reverse:            # Telethon default: newest-first
+            msgs = list(reversed(msgs))
+        if limit is not None:
+            msgs = msgs[:limit]
 
         async def gen():
             if flood is not None:
                 raise flood
-            for m in sorted(self._messages, key=lambda x: x.id):
-                if m.id > min_id:
-                    yield m
+            for m in msgs:
+                yield m
 
         return gen()
 
@@ -65,6 +69,25 @@ def test_backfill_ingests_only_above_cursor(pg_engine):
     with Session(pg_engine) as s:
         ids = set(s.scalars(select(Item.external_id).where(Item.source_id == sid)).all())
         assert ids == {"10", "11", "12"}
+
+
+def test_fresh_channel_seeds_only_recent_not_whole_history(pg_engine):
+    # a never-seen channel (cursor 0) must ingest only the most recent N posts,
+    # not its entire history — otherwise a busy aggregator floods the pipeline
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        sid = _tg_source(s, "@huge")
+        s.commit()
+
+    history = [_msg(id=i, message=f"m{i}") for i in range(1, 101)]   # 100 posts in history
+    client = FakeClient(history)
+    collector = TelegramCollector(sf)
+    n = asyncio.run(collector.backfill_source(client, sid, peer="x", first_seed_limit=5))
+
+    assert n == 5
+    with Session(pg_engine) as s:
+        ids = sorted(int(x) for x in s.scalars(select(Item.external_id).where(Item.source_id == sid)).all())
+        assert ids == [96, 97, 98, 99, 100]     # only the 5 most recent
 
 
 def test_backfill_waits_out_floodwait(pg_engine):
