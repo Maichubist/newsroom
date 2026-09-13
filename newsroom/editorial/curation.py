@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -32,6 +33,20 @@ log = logging.getLogger("newsroom.editorial.curation")
 CURATE_PUBLISH = "publish"
 CURATE_HOLD = "hold"
 POSTABLE_STATUSES = ("reported", "confirmed", "rumor")
+
+# Individual loss/obituary phrasing. Such a report about a specific, non-public
+# person is important and worthy but not mass-interest — we don't auto must-publish
+# it; the editor (ranker) decides, and holds unknown-individual ones. A mass-casualty
+# strike ("унаслідок удару загинули N") carries an attack marker and is reserved to
+# the attacks digest before curation, so it does not reach this check.
+_MEMORIAL_MARKERS = re.compile(
+    r"загин(ув|ула) (військов|бо[єе]ць|захисник|воїн|герой|солдат|сержант|офіцер)"
+    r"|на щиті|попрощал|прощання з|світла пам|вічна пам|не стало|"
+    r"віддали (останню )?шану|полягл", re.IGNORECASE)
+
+
+def _is_memorial(text: str | None) -> bool:
+    return bool(_MEMORIAL_MARKERS.search(text or ""))
 
 
 def must_publish(*, risk_level: str | None, has_official_source: bool,
@@ -114,6 +129,10 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 
 ПРИТРИМАти (hold) — дрібне, вузьконішеве, прохідне, дубль уже відомого, суто
 розважальне без ширшого значення, або важливе-але-рутинне з низьким попитом.
+Окремо: повідомлення про загибель КОНКРЕТНОЇ людини, невідомої широкому загалу
+(некролог, прощання з бійцем, «загинув військовий N») — hold. Це гідно шани, але не
+масова новина, і канал не має ставати стрічкою некрологів. ВИНЯТОК (publish): масові
+втрати внаслідок удару/події або загибель відомої публічної особи.
 
 Порівнюй кандидатів між собою: якщо подія слабша за решту в списку і за важливістю, і
 за попитом — hold.
@@ -231,7 +250,11 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
     decisions: dict[int, str] = {}
     to_rank: list[Candidate] = []
     for eid, title, rubric, risk, sig, fact_base, update_type in rows:
-        if must_publish(risk_level=risk, has_official_source=eid in official_ids, update_type=update_type):
+        # an individual loss/obituary must go through the editor (not the must-publish
+        # fast path), so an unknown-person memorial can be held
+        memorial = _is_memorial(title)
+        if not memorial and must_publish(risk_level=risk, has_official_source=eid in official_ids,
+                                         update_type=update_type):
             decisions[eid] = CURATE_PUBLISH
         else:
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,

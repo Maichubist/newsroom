@@ -5,7 +5,22 @@ import datetime as dt
 import pytest
 from sqlalchemy.orm import Session
 
-from newsroom.editorial.curation import Candidate, curate_pending, must_publish, parse_ranking
+from newsroom.editorial.curation import (
+    Candidate,
+    _is_memorial,
+    curate_pending,
+    must_publish,
+    parse_ranking,
+)
+
+
+def test_is_memorial_detects_individual_loss():
+    assert _is_memorial("На Сумщині загинув військовий Володимир Гринь") is True
+    assert _is_memorial("Прощання з Героєм у Львові") is True
+    assert _is_memorial("на щиті повернувся боєць") is True
+    # mass-casualty / general war news is NOT an individual memorial
+    assert _is_memorial("Унаслідок удару по Краматорську загинули двоє людей") is False
+    assert _is_memorial("Зеленський підписав указ") is False
 
 
 # --- must_publish (offline) ---------------------------------------------------
@@ -55,6 +70,42 @@ class FakeRanker:
         self.seen = [c.event_id for c in candidates]
         self.candidates = list(candidates)
         return {c.event_id: self.decisions.get(c.event_id, "hold") for c in candidates}
+
+
+@pytest.mark.pg
+def test_memorial_routed_to_ranker_not_must_publish(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, EventItem, Item, Source
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        official = Source(kind="telegram", handle_or_url="@mil", name="Військові", origin="ua",
+                          tier="official", is_official=True)
+        s.add(official)
+        s.flush()
+        mem = Event(status="confirmed", risk_level="critical", rubric="war",
+                    title="На Сумщині загинув військовий Володимир Гринь", significance=0.9, first_seen_at=now)
+        breaking = Event(status="confirmed", risk_level="critical", rubric="war",
+                         title="Масований ракетний удар по Києву, працює ППО", significance=0.9, first_seen_at=now)
+        s.add_all([mem, breaking])
+        s.flush()
+        for ev in (mem, breaking):
+            it = Item(source_id=official.id, external_id=f"o{ev.id}", content_hash=str(ev.id).ljust(64, "0"), title="t")
+            s.add(it)
+            s.flush()
+            s.add(EventItem(event_id=ev.id, item_id=it.id, role="official"))
+        mem_id, break_id = mem.id, breaking.id
+        s.commit()
+
+    ranker = FakeRanker({mem_id: "hold"})     # editor holds the individual memorial
+    curate_pending(sf, ranker, significance_threshold=0.55)
+
+    assert mem_id in ranker.seen              # memorial went through the editor...
+    assert break_id not in ranker.seen        # ...breaking critical+official is must-publish
+    with Session(pg_engine) as s:
+        assert s.get(Event, mem_id).curated == "hold"
+        assert s.get(Event, break_id).curated == "publish"
 
 
 @pytest.mark.pg
