@@ -19,7 +19,13 @@ from newsroom.analyze.clustering import best_match, update_centroid
 
 log = logging.getLogger("newsroom.analyze.stories")
 
-DEFAULT_STORY_THRESHOLD = 0.80          # looser than event clustering (longer window)
+# Looser than event clustering (0.83, near-identical): stories group the SAME
+# narrative across sources/wording over a long window. Calibrated on real data —
+# cross-source duplicates sit at cosine ~0.65-0.70, while distinct same-theme events
+# (e.g. drone strikes on different cities) sit at ~0.53-0.59, so ~0.62 separates
+# them. Narrow margin on a small sample — tunable via STORY_THRESHOLD; the robust
+# long-term fix is entity/LLM dedup (embeddings alone compress topical similarity).
+DEFAULT_STORY_THRESHOLD = 0.62
 DEFAULT_STORY_WINDOW_HOURS = 24 * 14    # 14 days
 HASHTAG_MIN_EVENTS = 3                   # charter §7: hashtag only after 3+ updates
 DEFAULT_DORMANT_DAYS = 5

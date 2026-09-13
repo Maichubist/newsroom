@@ -6,7 +6,15 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from newsroom.analyze.stories import StoryLinker, link_pending, mark_dormant, slugify
+import math
+
+from newsroom.analyze.stories import (
+    DEFAULT_STORY_THRESHOLD,
+    StoryLinker,
+    link_pending,
+    mark_dormant,
+    slugify,
+)
 from newsroom.db import make_session_factory
 from newsroom.db.base import EMBEDDING_DIM
 from newsroom.models import Event, Story, StoryVersion
@@ -103,6 +111,32 @@ def test_link_pending_links_unlinked_and_merges_similar(pg_engine):
 
     # idempotent: nothing left to link on a second tick
     assert link_pending(sf, StoryLinker(sf), limit=50)["linked"] == 0
+
+
+def _vec_cos(cos: float):
+    """Unit vector with the given cosine similarity to _vec(0) (= e0)."""
+    v = [0.0] * EMBEDDING_DIM
+    v[0] = cos
+    v[1] = math.sqrt(max(0.0, 1.0 - cos * cos))
+    return v
+
+
+def test_default_threshold_stays_calibrated():
+    # guard against silently reverting to 0.80 (which merged nothing cross-source)
+    assert 0.55 <= DEFAULT_STORY_THRESHOLD <= 0.70
+
+
+def test_cross_source_duplicate_now_merges(pg_engine):
+    # real cross-source duplicates sit at cosine ~0.65-0.70; the calibrated default
+    # must merge them (0.80 did not), while an unrelated event opens its own story
+    sf = make_session_factory(pg_engine)
+    linker = StoryLinker(sf)                       # default (calibrated) threshold
+    r1 = linker.assign(_event(pg_engine, _vec(0), title="Переговори (джерело A)"))
+    dup = linker.assign(_event(pg_engine, _vec_cos(0.66), title="Переговори (джерело B)"))
+    other = linker.assign(_event(pg_engine, _vec(500), title="Зовсім інша подія"))
+
+    assert dup.created_new is False and dup.story_id == r1.story_id   # duplicate merged
+    assert other.created_new is True and other.story_id != r1.story_id  # unrelated separate
 
 
 def test_mark_dormant(pg_engine):

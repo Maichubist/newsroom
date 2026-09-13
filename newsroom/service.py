@@ -253,10 +253,16 @@ async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 3
 
 
 def build_story_linker_from_env(session_factory):
-    """Assemble the story linker (§7). Pure vector similarity — no LLM."""
-    from newsroom.analyze.stories import StoryLinker
+    """Assemble the story linker (§7). Pure vector similarity — no LLM. Threshold
+    tunable via STORY_THRESHOLD (calibrated default separates cross-source duplicates
+    from distinct same-theme events)."""
+    from newsroom.analyze.stories import DEFAULT_STORY_THRESHOLD, StoryLinker
 
-    return StoryLinker(session_factory)
+    try:
+        threshold = float(os.getenv("STORY_THRESHOLD", str(DEFAULT_STORY_THRESHOLD)))
+    except (TypeError, ValueError):
+        threshold = DEFAULT_STORY_THRESHOLD
+    return StoryLinker(session_factory, threshold=threshold)
 
 
 async def stories_forever(session_factory, linker, *, tick_seconds: float = 30.0,
