@@ -16,6 +16,8 @@ class MediaStore(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
+    def get(self, key: str) -> bytes | None: ...
+
     def delete(self, key: str) -> bool: ...
 
 
@@ -39,6 +41,13 @@ class LocalMediaStore:
 
     def exists(self, key: str) -> bool:
         return (self.base_dir / key).exists()
+
+    def get(self, key: str) -> bytes | None:
+        """Read stored bytes back (for moderation/upload). None if the file is gone."""
+        try:
+            return (self.base_dir / key).read_bytes()
+        except FileNotFoundError:
+            return None
 
     def delete(self, key: str) -> bool:
         """Remove the stored file. Idempotent: returns True if a file was deleted,

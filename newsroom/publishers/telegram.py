@@ -142,21 +142,25 @@ class TelegramPublisher:
         return PublishResult(True, message_id=last_id)
 
     def send_media(self, choice, caption: str, *, chat_id: int | None = None,
-                   reply_to_message_id: int | None = None) -> PublishResult:
-        """Send one photo/video by URL with a caption (architecture §13 cascade).
-        The caller guarantees the caption fits TELEGRAM_CAPTION_LEN."""
+                   reply_to_message_id: int | None = None,
+                   file: tuple[str, bytes] | None = None) -> PublishResult:
+        """Send one photo/video with a caption (architecture §13 cascade). Either by
+        URL (Telegram fetches choice.url) or by uploading `file` (filename, bytes) for
+        Telegram-origin media that has no public URL. Caption fits TELEGRAM_CAPTION_LEN."""
         if not self.is_enabled():
             return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
         target = chat_id if chat_id is not None else self.active_chat_id
-        payload = {
-            "chat_id": target,
-            choice.param: choice.url,
-            "caption": caption,
-            "parse_mode": "HTML",
-        }
+        payload: dict = {"chat_id": target, "caption": caption, "parse_mode": "HTML"}
         if reply_to_message_id is not None:
             payload["reply_to_message_id"] = reply_to_message_id
             payload["allow_sending_without_reply"] = True
+        if file is not None:
+            # multipart upload: the media field carries the bytes, not a URL
+            payload["_file"] = {"field": choice.param, "filename": file[0], "data": file[1]}
+        else:
+            if not choice.url:
+                return PublishResult(False, error="media has neither url nor file")
+            payload[choice.param] = choice.url
         resp = self._poster(choice.method, payload)
         if not resp.get("ok"):
             err = resp.get("description") or resp.get("error") or str(resp)
@@ -165,14 +169,16 @@ class TelegramPublisher:
         return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id"))
 
     def send_post(self, body: str, media_choice=None, *, chat_id: int | None = None,
-                  reply_to_message_id: int | None = None) -> PublishResult:
+                  reply_to_message_id: int | None = None,
+                  file: tuple[str, bytes] | None = None) -> PublishResult:
         """Publish a post: media + caption when a media choice is given and the
         body fits a caption, otherwise text (the cascade falls back to text so a
-        long post never loses its content to caption truncation)."""
+        long post never loses its content to caption truncation). `file` uploads
+        Telegram-origin media bytes instead of sending a URL."""
         body = (body or "").strip()
         if media_choice is not None and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
             return self.send_media(media_choice, body, chat_id=chat_id,
-                                   reply_to_message_id=reply_to_message_id)
+                                   reply_to_message_id=reply_to_message_id, file=file)
         return self.send_text(body, chat_id=chat_id, reply_to_message_id=reply_to_message_id)
 
     def delete_message(self, chat_id: int | None, message_id: int) -> bool:
@@ -203,8 +209,18 @@ class TelegramPublisher:
         import httpx
 
         url = f"https://api.telegram.org/bot{self.token}/{method}"
+        upload = payload.pop("_file", None)
         try:
-            r = httpx.post(url, json=payload, timeout=20.0)
+            if upload is not None:
+                # multipart: scalar fields as form data (bools lowercased for Bot API),
+                # the media field as the uploaded file
+                data = {}
+                for k, v in payload.items():
+                    data[k] = ("true" if v else "false") if isinstance(v, bool) else str(v)
+                files = {upload["field"]: (upload["filename"], upload["data"])}
+                r = httpx.post(url, data=data, files=files, timeout=60.0)
+            else:
+                r = httpx.post(url, json=payload, timeout=20.0)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"request failed: {exc}"}
         try:

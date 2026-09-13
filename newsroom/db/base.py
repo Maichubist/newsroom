@@ -49,6 +49,8 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS classifier_model varchar(64)",
     # local media file deleted after publication (phash reuse-archive stays in DB)
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS purged_at timestamptz",
+    # Telegram message id for re-fetching url-less media via Telethon
+    "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS source_ref text",
 )
 
 

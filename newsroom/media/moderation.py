@@ -26,6 +26,35 @@ class ImageVerdict:
     reason: str = ""
 
 
+def _guess_image_mime(data: bytes) -> str:
+    """Best-effort content type from magic bytes (for the vision data URL)."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def moderation_source(store, url: str | None, storage_key: str | None) -> str | None:
+    """What to hand the vision model: the public URL when there is one, else a base64
+    data URL built from the locally stored bytes (Telegram media has no URL). None when
+    neither is available (no store, or the file is gone) — the caller then skips it."""
+    if url:
+        return url
+    if not storage_key or store is None:
+        return None
+    data = store.get(storage_key)
+    if not data:
+        return None
+    import base64
+
+    return f"data:{_guess_image_mime(data)};base64,{base64.b64encode(data).decode('ascii')}"
+
+
 def parse_image_verdict(raw: str | None) -> ImageVerdict | None:
     """Parse the model's JSON verdict. A missing 'blocked' field defaults to
     blocked (conservative). None if unparsable so the caller can retry."""
@@ -110,10 +139,12 @@ class ModerationResult:
 
 
 def moderate_event_media(session_factory, moderator: ImageModerator, event_id: int, *,
-                         charter_version: str = "0.2") -> ModerationResult:
+                         store=None, charter_version: str = "0.2") -> ModerationResult:
     """Moderate the event's images; journal media_vision_ok / media_vision_block.
-    Idempotent, and a no-op (no decision) for events without images."""
-    from sqlalchemy import func, select
+    Idempotent, and a no-op (no decision) for events without images. Telegram images
+    have no URL, so they are moderated from the locally stored bytes (needs `store`);
+    an image with neither a URL nor readable bytes is skipped, not silently cleared."""
+    from sqlalchemy import and_, func, or_, select
 
     from newsroom.models import Decision, EventItem, Item, MediaAsset
 
@@ -128,38 +159,48 @@ def moderate_event_media(session_factory, moderator: ImageModerator, event_id: i
         if already:
             return ModerationResult(event_id, skipped=True)
         images = list(s.execute(
-            select(MediaAsset.id, MediaAsset.url)
+            select(MediaAsset.id, MediaAsset.url, MediaAsset.storage_key)
             .join(Item, Item.id == MediaAsset.item_id)
             .join(EventItem, EventItem.item_id == Item.id)
             .where(EventItem.event_id == event_id, MediaAsset.kind == "image",
-                   MediaAsset.url.is_not(None))
+                   or_(MediaAsset.url.is_not(None),
+                       and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))))
         ).all())
 
     if not images:
         return ModerationResult(event_id, checked=0, skipped=True)
 
     flags: list[dict] = []
-    for media_id, url in images:
-        verdict = moderator.check(url)
+    checked = 0
+    for media_id, url, storage_key in images:
+        source = moderation_source(store, url, storage_key)
+        if source is None:
+            continue                         # cannot fetch this image -> do not clear it
+        checked += 1
+        verdict = moderator.check(source)
         if verdict.blocked:
             flags.append({"media_id": media_id, "labels": verdict.labels, "reason": verdict.reason})
+
+    if checked == 0:
+        return ModerationResult(event_id, checked=0, skipped=True)
 
     with session_factory() as s:
         s.add(Decision(
             entity_type="event", entity_id=str(event_id), stage="verify",
             decision="media_vision_block" if flags else "media_vision_ok",
-            reason=f"{len(flags)} blocked of {len(images)}",
-            details={"checked": len(images), "flags": flags},
+            reason=f"{len(flags)} blocked of {checked}",
+            details={"checked": checked, "flags": flags},
             charter_version=charter_version,
         ))
         s.commit()
-    return ModerationResult(event_id, checked=len(images), blocked=len(flags))
+    return ModerationResult(event_id, checked=checked, blocked=len(flags))
 
 
-def moderate_pending(session_factory, moderator: ImageModerator, *, limit: int = 25) -> dict[str, int]:
+def moderate_pending(session_factory, moderator: ImageModerator, *, store=None,
+                     limit: int = 25) -> dict[str, int]:
     """One moderation tick: moderate publishable events that own images and have
-    no vision verdict yet."""
-    from sqlalchemy import Integer, cast, select
+    no vision verdict yet. Considers both URL images and stored Telegram images."""
+    from sqlalchemy import Integer, and_, cast, or_, select
 
     from newsroom.models import Decision, Event, EventItem, Item, MediaAsset
 
@@ -175,14 +216,16 @@ def moderate_pending(session_factory, moderator: ImageModerator, *, limit: int =
             .join(Item, Item.id == EventItem.item_id)
             .join(MediaAsset, MediaAsset.item_id == Item.id)
             .where(Event.status.in_(("reported", "confirmed", "rumor")),
-                   MediaAsset.kind == "image", MediaAsset.url.is_not(None),
+                   MediaAsset.kind == "image",
+                   or_(MediaAsset.url.is_not(None),
+                       and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))),
                    Event.id.not_in(checked))
             .order_by(Event.id).distinct().limit(limit)
         ).scalars().all())
 
     stats = {"events": 0, "blocked": 0}
     for event_id in ids:
-        result = moderate_event_media(session_factory, moderator, event_id)
+        result = moderate_event_media(session_factory, moderator, event_id, store=store)
         if result.skipped:
             continue
         stats["events"] += 1

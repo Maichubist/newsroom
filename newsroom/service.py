@@ -457,14 +457,14 @@ def build_publisher_from_env(session_factory):
     from newsroom.analyze.stoplist import load_stoplist
     from newsroom.publishers import Publisher, Supervisor, TelegramPublisher, load_limits
 
-    telegram = TelegramPublisher.from_env()
-    # Delete local media files right after a post goes out (they are sent by URL and
-    # never read locally again). On by default; MEDIA_PURGE_AFTER_PUBLISH=false keeps them.
-    media_store = None
-    if os.getenv("MEDIA_PURGE_AFTER_PUBLISH", "true").strip().lower() in {"1", "true", "yes"}:
-        from newsroom.media import LocalMediaStore
+    from newsroom.media import LocalMediaStore
 
-        media_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
+    telegram = TelegramPublisher.from_env()
+    # The store lets the publisher upload Telegram-origin media (no public URL). Purge
+    # additionally deletes the local files right after a post goes out (they are never
+    # read again). On by default; MEDIA_PURGE_AFTER_PUBLISH=false keeps them.
+    media_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
+    purge = os.getenv("MEDIA_PURGE_AFTER_PUBLISH", "true").strip().lower() in {"1", "true", "yes"}
     return Publisher(
         session_factory,
         telegram=telegram,
@@ -472,6 +472,7 @@ def build_publisher_from_env(session_factory):
         limits=load_limits(CONFIG_DIR / "limits.yaml"),
         supervisor=Supervisor.from_env(telegram),
         media_store=media_store,
+        purge_media_after_publish=purge,
     )
 
 
@@ -541,6 +542,31 @@ async def media_download_forever(session_factory, downloader, *, tick_seconds: f
         await asyncio.sleep(tick_seconds)
 
 
+def build_tg_media_downloader_from_env(session_factory):  # pragma: no cover — Pillow
+    """Assemble the Telegram media downloader (local store + Pillow decoder). Fetch is
+    via the collector's live Telethon client, passed in at loop time."""
+    from newsroom.media import LocalMediaStore, PillowDecoder, TelegramMediaDownloader
+
+    store_dir = os.getenv("MEDIA_STORE_DIR", "./media")
+    return TelegramMediaDownloader(session_factory, store=LocalMediaStore(store_dir), decoder=PillowDecoder())
+
+
+async def tg_media_download_forever(session_factory, collector, downloader, *, tick_seconds: float = 45.0,
+                                    stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Download url-less Telegram media for filter-passed items via the collector's
+    shared Telethon session, then store + pHash it like HTTP media. Runs on the main
+    loop (Telethon calls stay on their client's loop). Nothing is published."""
+    client = await collector.wait_client()
+    while not (stop and stop.is_set()):
+        try:
+            stats = await downloader.download_pending(client)
+            if stats.get("stored"):
+                log.info("tg-media tick", extra=bind(**stats))
+        except Exception:
+            log.exception("tg-media tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def media_check_forever(session_factory, *, tick_seconds: float = 60.0,
                               stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Check publishable events' media for recycled images (pHash). DB-only, no
@@ -564,15 +590,16 @@ def build_image_moderator_from_env():  # pragma: no cover — OpenAI vision
     return OpenAIImageModerator()
 
 
-async def media_moderation_forever(session_factory, moderator, *, tick_seconds: float = 60.0,
+async def media_moderation_forever(session_factory, moderator, *, store=None, tick_seconds: float = 60.0,
                                    stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Moderate downloaded images (the media stop-list) so verified media can
-    attach to posts. Nothing is published."""
+    attach to posts. Telegram images have no URL, so a store is passed to moderate
+    them from the stored bytes. Nothing is published."""
     from newsroom.media import moderate_pending
 
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(moderate_pending, session_factory, moderator)
+            stats = await asyncio.to_thread(moderate_pending, session_factory, moderator, store=store)
             if stats.get("events"):
                 log.info("media-moderation tick", extra=bind(**stats))
         except Exception:
@@ -742,6 +769,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         downloader = build_media_downloader_from_env(session_factory)
         tasks.append(asyncio.create_task(media_download_forever(session_factory, downloader)))
         log.info("media download enabled")
+        # Telegram media has no URL — fetch it via the collector's Telethon session.
+        if telegram_collector is not None:
+            tg_downloader = build_tg_media_downloader_from_env(session_factory)
+            tasks.append(asyncio.create_task(
+                tg_media_download_forever(session_factory, telegram_collector, tg_downloader)))
+            log.info("telegram media download enabled")
     else:
         log.info("media download disabled (MEDIA_DOWNLOAD_ENABLED off)")
 
@@ -770,8 +803,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("media check disabled (MEDIA_CHECK_ENABLED off)")
 
     if media_moderation_enabled():
+        from newsroom.media import LocalMediaStore
+
         moderator = build_image_moderator_from_env()
-        tasks.append(asyncio.create_task(media_moderation_forever(session_factory, moderator)))
+        mod_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
+        tasks.append(asyncio.create_task(
+            media_moderation_forever(session_factory, moderator, store=mod_store)))
         log.info("media moderation enabled")
     else:
         log.info("media moderation disabled (MEDIA_MODERATION_ENABLED off)")

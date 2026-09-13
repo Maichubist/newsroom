@@ -23,6 +23,14 @@ def test_ignores_embeds_and_urlless():
     assert choose_media([MediaItem("embed", "http://x/e"), MediaItem("image", None, width=999)]) is None
 
 
+def test_stored_file_is_sendable_without_url():
+    # Telegram media has no URL but a stored file -> still eligible (uploaded, not fetched)
+    c = choose_media([MediaItem("image", url=None, width=800, storage_key="ab/abcd")])
+    assert c is not None and c.param == "photo" and c.url is None and c.storage_key == "ab/abcd"
+    # nothing sendable at all -> None
+    assert choose_media([MediaItem("image", url=None, width=800, storage_key=None)]) is None
+
+
 def test_respects_size_limits():
     limits = MediaLimits(photo_max_bytes=1000, video_max_bytes=1000)
     # video too big, image too big -> nothing
@@ -86,3 +94,22 @@ def test_send_post_falls_back_to_text_when_body_too_long_for_caption():
     long_body = "х" * 1500          # exceeds the 1024 caption limit
     _pub(poster).send_post(long_body, choice)
     assert all(m == "sendMessage" for m, _ in poster.calls)   # media dropped, text preserved
+
+
+def test_send_media_uploads_file_when_no_url():
+    # Telegram-origin media: no URL, uploaded as a multipart file (carried in _file)
+    poster = RecordingPoster()
+    choice = choose_media([MediaItem("image", url=None, width=800, storage_key="ab/cd")])
+    _pub(poster).send_post("Підпис.", choice, file=("photo.jpg", b"\xff\xd8\xff bytes"))
+    method, payload = poster.calls[0]
+    assert method == "sendPhoto"
+    assert "photo" not in payload                         # not a URL send
+    assert payload["_file"]["field"] == "photo" and payload["_file"]["data"] == b"\xff\xd8\xff bytes"
+    assert payload["caption"] == "Підпис."
+
+
+def test_send_media_errors_when_neither_url_nor_file():
+    poster = RecordingPoster()
+    choice = choose_media([MediaItem("image", url=None, width=800, storage_key="ab/cd")])
+    result = _pub(poster).send_media(choice, "cap")       # no file passed
+    assert result.ok is False and poster.calls == []

@@ -34,13 +34,15 @@ class MediaItem:
     url: str | None = None
     width: int | None = None
     size_bytes: int | None = None
+    storage_key: str | None = None  # local stored file (Telegram media, sent by upload)
 
 
 @dataclass(frozen=True)
 class MediaChoice:
     method: str                     # sendPhoto | sendVideo
     param: str                      # photo | video
-    url: str
+    url: str | None = None          # public URL (Telegram fetches it) ...
+    storage_key: str | None = None  # ... or a local file to upload (Telegram media)
 
 
 def _within(size_bytes: int | None, limit: int) -> bool:
@@ -49,24 +51,30 @@ def _within(size_bytes: int | None, limit: int) -> bool:
     return size_bytes is None or size_bytes <= limit
 
 
+def _sendable(i: MediaItem) -> bool:
+    # a URL Telegram can fetch, or a local file we can upload
+    return bool(i.url or i.storage_key)
+
+
 def choose_media(items: list[MediaItem], limits: MediaLimits | None = None) -> MediaChoice | None:
-    """video → widest image → nothing. Only items with a URL and within the size
-    limit are eligible; embeds are never sent."""
+    """video → widest image → nothing. Only items sendable (a URL or a stored file) and
+    within the size limit are eligible; embeds are never sent."""
     limits = limits or MediaLimits()
 
-    videos = [i for i in items if i.kind == "video" and i.url and _within(i.size_bytes, limits.video_max_bytes)]
+    videos = [i for i in items if i.kind == "video" and _sendable(i) and _within(i.size_bytes, limits.video_max_bytes)]
     if videos:
-        return MediaChoice(method="sendVideo", param="video", url=videos[0].url)  # type: ignore[arg-type]
+        v = videos[0]
+        return MediaChoice(method="sendVideo", param="video", url=v.url, storage_key=v.storage_key)
 
     images = [
         i for i in items
-        if i.kind == "image" and i.url
+        if i.kind == "image" and _sendable(i)
         and _within(i.size_bytes, limits.photo_max_bytes)
         and _wide_enough(i.width, limits.min_image_width)
     ]
     if images:
         widest = max(images, key=lambda i: (i.width or 0))
-        return MediaChoice(method="sendPhoto", param="photo", url=widest.url)  # type: ignore[arg-type]
+        return MediaChoice(method="sendPhoto", param="photo", url=widest.url, storage_key=widest.storage_key)
 
     return None
 

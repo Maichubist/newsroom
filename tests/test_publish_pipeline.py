@@ -244,19 +244,25 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
 
 
 class FakeStore:
-    """Records deletes so the test can assert the local file was purged."""
+    """In-memory store: serves seeded bytes and records deletes."""
 
-    def __init__(self):
+    def __init__(self, files=None):
+        self.files = dict(files or {})
         self.deleted: list[str] = []
 
     def put(self, key, data):  # pragma: no cover - unused here
+        self.files[key] = data
         return key
 
     def exists(self, key):  # pragma: no cover - unused here
-        return key not in self.deleted
+        return key in self.files and key not in self.deleted
+
+    def get(self, key):
+        return self.files.get(key)
 
     def delete(self, key):
         self.deleted.append(key)
+        self.files.pop(key, None)
         return True
 
 
@@ -294,7 +300,8 @@ def test_local_media_deleted_after_publish(pg_engine):
         s.commit()
 
     tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
-    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, media_store=store)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS,
+                          media_store=store, purge_media_after_publish=True)
     assert publisher.publish_one(pid).published is True
 
     assert store.deleted == ["ab/abcd"]        # only the downloaded file was deleted
@@ -303,6 +310,88 @@ def test_local_media_deleted_after_publish(pg_engine):
         assert d.storage_key == "ab/abcd"       # key kept so nothing re-downloads
         assert d.purged_at is not None          # marked gone-locally
         assert s.get(MediaAsset, pending_id).purged_at is None   # never downloaded -> untouched
+
+
+def test_telegram_media_uploaded_as_file(pg_engine):
+    # a url-less Telegram image (storage_key set) that passed both checks is UPLOADED
+    # (multipart), not sent by URL. Purge off so the stored bytes survive to send.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@ch", name="ch", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="tm1", content_hash="tm1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url=None, width=1200,
+                         storage_key="ab/cd", source_ref="5"))
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    poster = RecordingPoster()
+    store = FakeStore({"ab/cd": b"\xff\xd8\xffphoto-bytes"})
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, media_store=store)
+    assert publisher.publish_one(pid).published is True
+
+    method, payload = poster.calls[0]
+    assert method == "sendPhoto"
+    assert "photo" not in payload                              # not a URL send
+    assert payload["_file"]["field"] == "photo"
+    assert payload["_file"]["data"] == b"\xff\xd8\xffphoto-bytes"
+
+
+def test_telegram_media_falls_back_to_text_when_file_missing(pg_engine):
+    # stored file gone (e.g. purged) -> drop media, post as text, do NOT fail the publish
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@ch2", name="ch2", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="tm2", content_hash="tm2".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url=None, width=1200,
+                         storage_key="gone/x", source_ref="6"))
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    poster = RecordingPoster()
+    store = FakeStore()          # empty -> get returns None
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, media_store=store)
+    assert publisher.publish_one(pid).published is True
+    assert poster.calls[0][0] == "sendMessage"                 # posted as text, not failed
 
 
 def test_media_not_purged_when_no_store(pg_engine):

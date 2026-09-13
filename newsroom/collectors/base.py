@@ -88,6 +88,7 @@ class RawMedia:
     width: int | None = None
     height: int | None = None
     size_bytes: int | None = None
+    source_ref: str | None = None    # Telegram message id (url-less media fetched via Telethon)
 
 
 @dataclass

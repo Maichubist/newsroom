@@ -49,6 +49,7 @@ def upsert_raw_item(session: Session, raw: RawItem) -> tuple[Item, bool]:
             session.add(MediaAsset(
                 item_id=item.id, kind=m.kind, url=m.url,
                 width=m.width, height=m.height, size_bytes=m.size_bytes,
+                source_ref=m.source_ref,
             ))
         return item, True
 

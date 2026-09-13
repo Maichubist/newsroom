@@ -30,6 +30,27 @@ def _http_fetch(url: str, *, timeout: float = 20.0) -> bytes:  # pragma: no cove
     return resp.content
 
 
+def persist_media_bytes(session_factory, store, decoder, *, media_id: int, item_id: int,
+                        key_source: str, kind: str, data: bytes) -> tuple[str, bool]:
+    """Store fetched bytes behind the MediaStore, set storage_key + size, and for an
+    image compute + save the pHash (reuse check). Shared by the HTTP and Telethon
+    downloaders. `key_source` is any stable string folded into the storage key (a URL
+    for RSS, the tg message ref for Telegram). Returns (storage_key, hashed)."""
+    from newsroom.models import MediaAsset
+
+    key = store.put(media_key(item_id, media_id, key_source or ""), data)
+    phash = phash_bytes(data, decoder) if (kind == "image" and decoder is not None) else None
+    with session_factory() as s:
+        asset = s.get(MediaAsset, media_id)
+        if asset is not None:
+            asset.storage_key = key
+            asset.size_bytes = len(data)
+            if phash is not None:
+                asset.phash = phash
+            s.commit()
+    return key, phash is not None
+
+
 @dataclass(frozen=True)
 class DownloadResult:
     media_id: int
@@ -65,21 +86,10 @@ class MediaDownloader:
         if not data or len(data) > self.max_bytes:
             return DownloadResult(media_id, skipped=True, error="too_large_or_empty")
 
-        key = self.store.put(media_key(item_id, media_id, url), data)
-        phash = None
-        if kind == "image" and self.decoder is not None:
-            phash = phash_bytes(data, self.decoder)
-
-        with self.sf() as s:
-            asset = s.get(MediaAsset, media_id)
-            if asset is None:
-                return DownloadResult(media_id, skipped=True)
-            asset.storage_key = key
-            asset.size_bytes = len(data)
-            if phash is not None:
-                asset.phash = phash
-            s.commit()
-        return DownloadResult(media_id, stored=True, hashed=phash is not None)
+        _key, hashed = persist_media_bytes(
+            self.sf, self.store, self.decoder,
+            media_id=media_id, item_id=item_id, key_source=url, kind=kind, data=data)
+        return DownloadResult(media_id, stored=True, hashed=hashed)
 
     def download_pending(self, *, limit: int = 50) -> dict[str, int]:
         """Download media for filter-passed items that has not been stored yet."""

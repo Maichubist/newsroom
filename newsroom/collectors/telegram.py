@@ -57,16 +57,20 @@ def extract_forwarded_from(msg) -> str | None:
 
 
 def extract_media(msg) -> list[RawMedia]:
-    """Record media presence/metadata only. No URLs, no download in 1a."""
+    """Record media presence/metadata. Telegram media has no public URL, so we stamp
+    each asset with its message id (source_ref); the media pipeline later fetches the
+    bytes via Telethon by that id (§12: download only after the item passes the filter)."""
+    ref = getattr(msg, "id", None)
+    ref = str(ref) if ref is not None else None
     out: list[RawMedia] = []
     if getattr(msg, "photo", None) is not None:
-        out.append(RawMedia(kind="image", url=None))
+        out.append(RawMedia(kind="image", url=None, source_ref=ref))
     video = getattr(msg, "video", None)
     doc = getattr(msg, "document", None)
     if video is not None:
-        out.append(RawMedia(kind="video", url=None, size_bytes=getattr(video, "size", None)))
+        out.append(RawMedia(kind="video", url=None, size_bytes=getattr(video, "size", None), source_ref=ref))
     elif doc is not None and str(getattr(doc, "mime_type", "") or "").startswith("video"):
-        out.append(RawMedia(kind="video", url=None, size_bytes=getattr(doc, "size", None)))
+        out.append(RawMedia(kind="video", url=None, size_bytes=getattr(doc, "size", None), source_ref=ref))
     return out
 
 

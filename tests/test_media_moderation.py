@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 
 from newsroom.media.moderation import (
     ImageVerdict,
+    _guess_image_mime,
     moderate_event_media,
     moderate_pending,
+    moderation_source,
     parse_image_verdict,
 )
 
@@ -35,6 +37,32 @@ def test_parse_verdict_invalid_is_none():
     assert parse_image_verdict("not json") is None
     assert parse_image_verdict(None) is None
     assert parse_image_verdict("[1,2]") is None
+
+
+# --- moderation_source / mime (offline) ---------------------------------------
+
+def test_guess_image_mime():
+    assert _guess_image_mime(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
+    assert _guess_image_mime(b"\x89PNG\r\n\x1a\nrest") == "image/png"
+    assert _guess_image_mime(b"RIFF????WEBPvp8") == "image/webp"
+    assert _guess_image_mime(b"unknown") == "image/jpeg"          # conservative default
+
+
+class DictStore:
+    def __init__(self, files=None):
+        self.files = dict(files or {})
+
+    def get(self, key):
+        return self.files.get(key)
+
+
+def test_moderation_source_prefers_url_then_stored_bytes():
+    store = DictStore({"k1": b"\xff\xd8\xffdata"})
+    assert moderation_source(store, "http://x/a.jpg", "k1") == "http://x/a.jpg"   # url wins
+    src = moderation_source(store, None, "k1")
+    assert src.startswith("data:image/jpeg;base64,")
+    assert moderation_source(store, None, "missing") is None                     # no file
+    assert moderation_source(None, None, "k1") is None                           # no store
 
 
 # --- moderate_event_media (pg) ------------------------------------------------
@@ -123,3 +151,38 @@ def test_moderate_pending_selects_events_with_images(pg_engine):
     _event_with_images(pg_engine, ["http://x/b.jpg"], status="signal")   # not publishable
     stats = moderate_pending(sf, FakeModerator(), limit=50)
     assert stats["events"] == 1
+
+
+@pytest.mark.pg
+def test_moderate_stored_telegram_image_via_store(pg_engine):
+    # a url-less Telegram image (storage_key set) is moderated from the stored bytes
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@ch", name="ch", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="m1", content_hash="m1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url=None, storage_key="ab/cd", source_ref="1"))
+        ev = Event(status="confirmed", title="e", first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id))
+        eid = ev.id
+        s.commit()
+
+    store = DictStore({"ab/cd": b"\xff\xd8\xffphoto"})
+    # without a store the url-less image cannot be moderated -> skipped, no decision
+    assert moderate_event_media(sf, FakeModerator(), eid, store=None).skipped
+    with Session(pg_engine) as s:
+        assert s.scalar(select(Decision).where(Decision.entity_id == str(eid))) is None
+    # with the store it is moderated from the bytes
+    r = moderate_event_media(sf, FakeModerator(), eid, store=store)
+    assert r.checked == 1 and r.blocked == 0
+    with Session(pg_engine) as s:
+        d = s.execute(select(Decision).where(Decision.entity_id == str(eid))).scalars().one()
+        assert d.decision == "media_vision_ok"

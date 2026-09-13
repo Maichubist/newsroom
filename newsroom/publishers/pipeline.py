@@ -59,13 +59,17 @@ def _render_send_body(pub) -> str:
 
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
-                 supervisor=None, media_store=None, charter_version: str = "0.2"):
+                 supervisor=None, media_store=None, purge_media_after_publish: bool = False,
+                 charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
         self.limits = limits
         self.supervisor = supervisor
-        self.media_store = media_store   # when set, local media is deleted after publish
+        # media_store lets the publisher read stored Telegram media to upload it;
+        # purge_media_after_publish additionally deletes local files once a post is out.
+        self.media_store = media_store
+        self.purge_media_after_publish = bool(purge_media_after_publish)
         self.charter_version = charter_version
 
     # ------------------------------------------------------------------
@@ -148,7 +152,16 @@ class Publisher:
             self._record_block(publication_id, decision.reasons)
             return PublishOutcome(publication_id, published=False, reasons=decision.reasons)
 
-        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id)
+        # Telegram-origin media has no URL — upload the stored bytes. If they can't be
+        # read, drop the media and post as text rather than failing the publish.
+        media_file = None
+        if media_choice is not None and not media_choice.url and media_choice.storage_key:
+            media_file = self._media_file(media_choice)
+            if media_file is None:
+                media_choice = None
+
+        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id,
+                                         file=media_file)
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
@@ -204,14 +217,31 @@ class Publisher:
         if not (reuse_ok and vision_ok):
             return None
 
+        from sqlalchemy import and_, or_
+
         rows = s.execute(
-            select(MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes)
+            select(MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes,
+                   MediaAsset.storage_key)
             .join(Item, Item.id == MediaAsset.item_id)
             .join(EventItem, EventItem.item_id == Item.id)
-            .where(EventItem.event_id == event_id, MediaAsset.url.is_not(None))
+            .where(EventItem.event_id == event_id,
+                   or_(MediaAsset.url.is_not(None),
+                       and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))))
         ).all()
-        items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb) for k, u, w, sb in rows]
+        items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb, storage_key=sk)
+                 for k, u, w, sb, sk in rows]
         return choose_media(items)
+
+    def _media_file(self, choice):
+        """Read a url-less choice's stored bytes for upload (filename, bytes), or None
+        if there is no store or the file is gone (caller then posts text)."""
+        if self.media_store is None or not choice.storage_key:
+            return None
+        data = self.media_store.get(choice.storage_key)
+        if not data:
+            return None
+        ext = "mp4" if choice.param == "video" else "jpg"
+        return (f"{choice.param}.{ext}", data)
 
     def _story_reply_target(self, s, event):
         """The story's most recent published Telegram post in the current channel
@@ -246,8 +276,8 @@ class Publisher:
 
     def _purge_media(self, event_id) -> None:
         """Delete the event's local media files right after a successful publish
-        (opt-in via media_store). A cleanup failure must never fail the publish."""
-        if self.media_store is None or event_id is None:
+        (opt-in). A cleanup failure must never fail the publish."""
+        if not self.purge_media_after_publish or self.media_store is None or event_id is None:
             return
         try:
             from newsroom.media import purge_event_media

@@ -106,6 +106,9 @@ class MediaAsset(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
     kind: Mapped[str] = mapped_column(String(16))   # image | video | embed
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Telegram media has no public URL — it is fetched via Telethon by the message id
+    # stored here (per asset, so album members re-fetch individually). NULL for RSS.
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
