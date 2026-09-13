@@ -65,3 +65,6 @@ ua_markers:
   - "гривн|гривень"
   - "шахтар|динамо київ|динамо києв|збірн(а|ої) україни"
   - "окупант|деокупац|обстріл|сил(и|) оборони"
+  # Латиниця/німецькі форми — щоб новини про Україну із зарубіжних видань (Fox, NYT,
+  # BBC, Spiegel, Tagesschau…) теж рахувались UA-релевантними (позитивний бонус).
+  - "ukrain|zelens|selensk|kyiv|kiew|kharkiv|charkiw|kharkov|odes|donetsk|donezk|luhansk|lugansk|zaporizh|saporisch|kherson|cherson|mariupol|crimea|donbas|azov"

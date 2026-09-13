@@ -58,8 +58,32 @@ sources:
   - {name: "Ars Technica", kind: rss, handle_or_url: "https://feeds.arstechnica.com/arstechnica/index", origin: world, lang: en, tier: media}
   - {name: "The Verge", kind: rss, handle_or_url: "https://www.theverge.com/rss/index.xml", origin: world, lang: en, tier: media}
   - {name: "MIT Technology Review", kind: rss, handle_or_url: "https://www.technologyreview.com/feed/", origin: world, lang: en, tier: media}
-  - {name: "VentureBeat AI", kind: rss, handle_or_url: "https://venturebeat.com/category/ai/feed/", origin: world, lang: en, tier: media}
   - {name: "Defense News", kind: rss, handle_or_url: "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", origin: world, lang: en, tier: media}
+  # Зарубіжні видання, де регулярно є новини про Україну (фіди звірені — живі XML, вер. 2026).
+  # Багато з них високооб'ємні й переважно НЕ про Україну — значущість/курація це фільтрують;
+  # за потреби вмикається пре-фільтр «лише згадки України» для origin: world (див. нижче).
+  # -- США --
+  - {name: "Fox News (World)", kind: rss, handle_or_url: "https://moxie.foxnews.com/google-publisher/world.xml", origin: world, lang: en, tier: media}
+  - {name: "Politico (US)", kind: rss, handle_or_url: "https://rss.politico.com/politics-news.xml", origin: world, lang: en, tier: media}
+  - {name: "The New York Times (World)", kind: rss, handle_or_url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", origin: world, lang: en, tier: media}
+  - {name: "CNN (World)", kind: rss, handle_or_url: "http://rss.cnn.com/rss/edition_world.rss", origin: world, lang: en, tier: media}
+  - {name: "NPR (World)", kind: rss, handle_or_url: "https://feeds.npr.org/1004/rss.xml", origin: world, lang: en, tier: media}
+  # -- Велика Британія --
+  - {name: "The Guardian (Україна)", kind: rss, handle_or_url: "https://www.theguardian.com/world/ukraine/rss", origin: world, lang: en, tier: media}
+  - {name: "BBC (Europe)", kind: rss, handle_or_url: "https://feeds.bbci.co.uk/news/world/europe/rss.xml", origin: world, lang: en, tier: media}
+  - {name: "The Independent (World)", kind: rss, handle_or_url: "https://www.independent.co.uk/news/world/rss", origin: world, lang: en, tier: media}
+  - {name: "Sky News (World)", kind: rss, handle_or_url: "https://feeds.skynews.com/feeds/rss/world.xml", origin: world, lang: en, tier: media}
+  # -- Німеччина --
+  - {name: "Der Spiegel (International)", kind: rss, handle_or_url: "https://www.spiegel.de/international/index.rss", origin: world, lang: en, tier: media}
+  - {name: "Tagesschau", kind: rss, handle_or_url: "https://www.tagesschau.de/index~rss2.xml", origin: world, lang: de, tier: media}
+  - {name: "Die Zeit", kind: rss, handle_or_url: "https://newsfeed.zeit.de/index", origin: world, lang: de, tier: media}
+  # -- Франція --
+  - {name: "Le Monde (English)", kind: rss, handle_or_url: "https://www.lemonde.fr/en/rss/une.xml", origin: world, lang: en, tier: media}
+  - {name: "France 24 (Europe)", kind: rss, handle_or_url: "https://www.france24.com/en/europe/rss", origin: world, lang: en, tier: media}
+  # -- Профільні по Україні/регіону (англомовні) --
+  - {name: "Kyiv Post", kind: rss, handle_or_url: "https://www.kyivpost.com/feed", origin: ua, lang: en, tier: media}
+  - {name: "Euromaidan Press", kind: rss, handle_or_url: "https://euromaidanpress.com/feed/", origin: ua, lang: en, tier: media}
+  - {name: "The Moscow Times", kind: rss, handle_or_url: "https://www.themoscowtimes.com/rss/news", origin: world, lang: en, tier: media}
 
   # --- Офіційні держ/військові Telegram-канали (is_official) ---
   # Хендли звірені веб-пошуком (вер. 2026). Це першоджерела для критичних тем
