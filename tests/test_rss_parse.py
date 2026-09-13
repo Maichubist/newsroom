@@ -1,6 +1,25 @@
 from __future__ import annotations
 
-from newsroom.collectors.rss import parse_feed
+from newsroom.collectors.rss import _is_denied_media, parse_feed
+
+_PLACEHOLDER_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>t</title>
+<item><title>A</title><link>https://ex/a</link><guid>a</guid>
+  <enclosure url="https://cdn4.suspilne.media/images/default.jpg" type="image/jpeg"/></item>
+<item><title>B</title><link>https://ex/b</link><guid>b</guid>
+  <enclosure url="https://cdn/real-photo.jpg" type="image/jpeg"/></item>
+</channel></rss>"""
+
+
+def test_denied_media_url():
+    assert _is_denied_media("https://cdn4.suspilne.media/images/default.jpg") is True
+    assert _is_denied_media("https://cdn/real-photo.jpg") is False
+
+
+def test_parse_feed_drops_placeholder_media():
+    items = {i.external_id: i for i in parse_feed(1, _PLACEHOLDER_FEED)}
+    assert items["a"].media == []                       # default.jpg dropped -> og:image resolver will fill
+    assert [m.url for m in items["b"].media] == ["https://cdn/real-photo.jpg"]
 
 FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">

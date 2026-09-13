@@ -456,14 +456,20 @@ def build_publisher_from_env(session_factory):
     )
 
 
-async def publish_forever(session_factory, publisher, *, tick_seconds: float = 20.0,
+async def publish_forever(session_factory, publisher, *, tick_seconds: float = 15.0,
                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Publish critic-passed drafts that clear the gate. The Publisher no-ops when
-    the master switch is off; each draft still passes the stop button, stop-list,
-    limits and surge check before anything is sent."""
+    """Publish critic-passed drafts that clear the gate, ONE at a time by default so
+    posts come out spaced (most-significant first), not as a burst. Volume is decided
+    upstream by curation, not here — PUBLISH_BATCH only controls how many go per tick.
+    The Publisher no-ops when the master switch is off; each draft still passes the
+    stop button, stop-list, limits and surge check before anything is sent."""
+    try:
+        batch = max(1, int(os.getenv("PUBLISH_BATCH", "1")))
+    except (TypeError, ValueError):
+        batch = 1
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(publisher.publish_pending)
+            stats = await asyncio.to_thread(publisher.publish_pending, limit=batch)
             if stats.get("published") or stats.get("blocked"):
                 log.info("publish tick", extra=bind(**stats))
         except Exception:

@@ -7,6 +7,7 @@ import calendar
 import datetime as dt
 import html
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -24,6 +25,21 @@ log = logging.getLogger("newsroom.collectors.rss")
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _USER_AGENT = "Mozilla/5.0 (compatible; newsroom/0.1; +https://example.org)"
+
+# Placeholder/default images some feeds ship instead of the real article image
+# (e.g. Суспільне's cdn/default.jpg). Skipping them here means the item arrives with
+# no media, so the og:image resolver fetches the real picture from the article page.
+# URL substrings, case-insensitive; extend via MEDIA_URL_DENY (comma-separated).
+_MEDIA_URL_DENY = tuple(
+    s.strip().lower() for s in os.getenv(
+        "MEDIA_URL_DENY", "default.jpg,default.png,placeholder,no_image,noimage,no-image,blank."
+    ).split(",") if s.strip()
+)
+
+
+def _is_denied_media(url: str | None) -> bool:
+    u = (url or "").lower()
+    return bool(u) and any(bad in u for bad in _MEDIA_URL_DENY)
 
 
 def _strip_html(value: str | None) -> str | None:
@@ -81,10 +97,11 @@ def _media(entry) -> list[RawMedia]:
         url = th.get("url")
         if url:
             out.append(RawMedia(kind="image", url=url))
-    # de-duplicate by url, keep first
+    # de-duplicate by url, keep first; drop placeholder/default images so the
+    # og:image resolver can fetch the real one from the article page
     seen, uniq = set(), []
     for m in out:
-        if m.url and m.url not in seen:
+        if m.url and m.url not in seen and not _is_denied_media(m.url):
             seen.add(m.url)
             uniq.append(m)
     return uniq
