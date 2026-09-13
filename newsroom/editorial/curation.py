@@ -198,6 +198,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
     conditions = [
         Event.status.in_(POSTABLE_STATUSES),
         Event.curated.is_(None),
+        Event.duplicate_of.is_(None),        # skip events marked duplicate (LLM batch dedup)
         Event.first_seen_at >= cutoff,
     ]
     if significance_threshold is not None:

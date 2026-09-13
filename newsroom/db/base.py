@@ -41,6 +41,7 @@ def make_session_factory(engine: Engine) -> sessionmaker:
 _ADDITIVE_COLUMNS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS significance double precision",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS curated varchar(16)",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS duplicate_of bigint",
 )
 
 

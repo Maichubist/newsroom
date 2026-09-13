@@ -56,6 +56,10 @@ def significance_enabled() -> bool:
     return os.getenv("SIGNIFICANCE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def dedup_enabled() -> bool:
+    return os.getenv("DEDUP_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def curation_enabled() -> bool:
     return os.getenv("CURATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -337,6 +341,30 @@ async def significance_forever(session_factory, config, *, tick_seconds: float =
                 log.info("significance tick", extra=bind(**stats))
         except Exception:
             log.exception("significance tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+def build_dedup_grouper_from_env():  # pragma: no cover — needs OpenAI
+    """Assemble the LLM batch dedup grouper."""
+    from newsroom.editorial import LLMDedupGrouper
+
+    return LLMDedupGrouper()
+
+
+async def dedup_forever(session_factory, grouper, *, tick_seconds: float = 900.0,
+                        stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Group same-story duplicates in the recent window and mark non-canonicals
+    (events.duplicate_of), so only one of a duplicate set is posted. Runs before
+    curation/editorial. Slow cadence (one batched call). Nothing is published."""
+    from newsroom.editorial import dedup_pending
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(dedup_pending, session_factory, grouper)
+            if stats.get("duplicates"):
+                log.info("dedup tick", extra=bind(**stats))
+        except Exception:
+            log.exception("dedup tick failed")
         await asyncio.sleep(tick_seconds)
 
 
@@ -715,6 +743,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("story updates enabled")
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
+
+    if dedup_enabled():
+        grouper = build_dedup_grouper_from_env()
+        tasks.append(asyncio.create_task(dedup_forever(session_factory, grouper)))
+        log.info("LLM batch dedup enabled")
+    else:
+        log.info("LLM batch dedup disabled (DEDUP_ENABLED off)")
 
     if curation_enabled():
         ranker = build_editorial_ranker_from_env()

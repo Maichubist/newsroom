@@ -199,6 +199,7 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
 
     conditions = [
         Event.status.in_(("reported", "confirmed", "rumor")),
+        Event.duplicate_of.is_(None),        # a duplicate never drafts (LLM batch dedup)
         or_(
             Event.update_type.in_(postworthy),
             and_(

@@ -17,6 +17,12 @@ from newsroom.editorial.curation import (
     must_publish,
     parse_ranking,
 )
+from newsroom.editorial.dedup import (
+    DedupGrouper,
+    LLMDedupGrouper,
+    dedup_pending,
+    parse_groups,
+)
 from newsroom.editorial.pipeline import EditorialPipeline, ProduceResult, produce_drafts
 from newsroom.editorial.updates import (
     ROUTE_POST,
@@ -40,6 +46,8 @@ __all__ = [
     # editorial curation (§: publish by merit, not by rate)
     "Candidate", "EditorialRanker", "LLMEditorialRanker", "curate_pending",
     "must_publish", "parse_ranking", "CURATE_PUBLISH", "CURATE_HOLD",
+    # LLM batch dedup
+    "DedupGrouper", "LLMDedupGrouper", "dedup_pending", "parse_groups",
     # story updates (§7, §8.5)
     "UpdateDecision", "UpdateResult", "UpdateClassifier", "LLMUpdateClassifier",
     "StoryUpdater", "classify_pending", "parse_update", "route_update",
