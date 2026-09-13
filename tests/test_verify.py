@@ -12,7 +12,7 @@ from newsroom.analyze.stoplist import load_stoplist
 from newsroom.analyze.verify import Classification, Verifier
 from newsroom.db import make_session_factory
 from newsroom.db.base import EMBEDDING_DIM
-from newsroom.models import Decision, Event, Item, Source
+from newsroom.models import Decision, Event, EventItem, Item, Source
 
 pytestmark = pytest.mark.pg
 
@@ -48,6 +48,18 @@ class FakeClassifier:
 
     def classify(self, title, text):
         return self._result(title, text) if callable(self._result) else self._result
+
+
+class CountingClassifier:
+    model = "count-clf"
+
+    def __init__(self, result):
+        self._result = result
+        self.calls = 0
+
+    def classify(self, title, text):
+        self.calls += 1
+        return self._result
 
 
 def _source(s: Session, handle: str, *, official: bool = False, tier: str = "media") -> int:
@@ -136,6 +148,42 @@ def test_critical_with_official_source_is_confirmed(pg_engine):
     v = _verifier(pg_engine, Classification(is_event=True, rubrics=["war"]))
     r = v.verify_item(iid)
     assert r.event_status == "confirmed"
+
+
+def test_classifier_runs_once_per_event(pg_engine):
+    # two reprints of the same news -> one event; the LLM classifier is paid for
+    # once (per event), not once per item. This is the cost saving of the reorder.
+    with Session(pg_engine) as s:
+        s1 = _source(s, "vrf-once-a")
+        s2 = _source(s, "vrf-once-b")
+        i1 = _item(s, s1, "o1", "Іран", "iran talks, політика")
+        i2 = _item(s, s2, "o2", "Іран-2", "iran talks continue, політика")
+        s.commit()
+    clf = CountingClassifier(Classification(is_event=True, rubrics=["politics"]))
+    v = Verifier(make_session_factory(pg_engine), classifier=clf, embedder=FakeEmbedder(),
+                 risk_matrix=RISK, filters=FILTERS, stoplist_rules=STOP)
+    r1 = v.verify_item(i1)
+    r2 = v.verify_item(i2)
+    assert r1.event_id == r2.event_id          # same embedding -> same event
+    assert clf.calls == 1                       # classified once per event, not per item
+    with Session(pg_engine) as s:
+        assert s.get(Event, r1.event_id).classifier_model == "count-clf"
+
+
+def test_non_event_cluster_is_retired(pg_engine):
+    # an item that clears the noise filter but the classifier deems a non-event:
+    # its cluster is retired (centroid cleared) so it never attracts more items.
+    with Session(pg_engine) as s:
+        sid = _source(s, "vrf-retire")
+        iid = _item(s, sid, "r1", "Роздуми", "Просто колонка без новини про життя.")
+        s.commit()
+    v = _verifier(pg_engine, Classification(is_event=False))
+    r = v.verify_item(iid)
+    assert r.item_status == "filtered_out" and _status(pg_engine, iid) == "filtered_out"
+    with Session(pg_engine) as s:
+        ev_id = s.execute(select(EventItem.event_id).where(EventItem.item_id == iid)).scalar_one()
+        ev = s.get(Event, ev_id)
+        assert ev.status == "filtered_out" and ev.centroid is None
 
 
 def test_decisions_are_journalled(pg_engine):

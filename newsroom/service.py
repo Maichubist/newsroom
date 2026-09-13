@@ -379,16 +379,27 @@ def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
     return LLMEditorialRanker()
 
 
-async def curation_forever(session_factory, ranker, *, significance_threshold: float | None = None,
+async def curation_forever(session_factory, ranker, *, grouper=None,
+                           significance_threshold: float | None = None,
                            window_hours: int = 6, tick_seconds: float = 120.0,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Mark recent significant events publish/hold (must-publish deterministically,
     the rest by comparative LLM ranking), before editorial. Only publish-marked
-    events are drafted — the count follows the news, not a fixed rate."""
-    from newsroom.editorial import curate_pending
+    events are drafted — the count follows the news, not a fixed rate.
+
+    When a dedup `grouper` is given, dedup runs FIRST in the same tick: curation
+    excludes events marked duplicate_of, so deduping immediately before curating
+    guarantees a cross-source duplicate is caught before it can be curated →
+    drafted → published (the standalone dedup loop's slow cadence let duplicates
+    slip through the 30s editorial loop first)."""
+    from newsroom.editorial import curate_pending, dedup_pending
 
     while not (stop and stop.is_set()):
         try:
+            if grouper is not None:
+                dstats = await asyncio.to_thread(dedup_pending, session_factory, grouper)
+                if dstats.get("duplicates"):
+                    log.info("dedup tick", extra=bind(**dstats))
             stats = await asyncio.to_thread(
                 curate_pending, session_factory, ranker,
                 significance_threshold=significance_threshold, window_hours=window_hours)
@@ -772,19 +783,24 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
 
+    # Dedup runs together with curation (dedup first, same tick) so a duplicate is
+    # marked before curation can pass it on to drafting. Only when curation is off
+    # does dedup need its own loop.
+    grouper = build_dedup_grouper_from_env() if dedup_enabled() else None
     if dedup_enabled():
-        grouper = build_dedup_grouper_from_env()
-        tasks.append(asyncio.create_task(dedup_forever(session_factory, grouper)))
-        log.info("LLM batch dedup enabled")
+        log.info("LLM batch dedup enabled", extra=bind(with_curation=curation_enabled()))
     else:
         log.info("LLM batch dedup disabled (DEDUP_ENABLED off)")
 
     if curation_enabled():
         ranker = build_editorial_ranker_from_env()
         tasks.append(asyncio.create_task(curation_forever(
-            session_factory, ranker, significance_threshold=significance_threshold)))
+            session_factory, ranker, grouper=grouper,
+            significance_threshold=significance_threshold)))
         log.info("editorial curation enabled")
     else:
+        if grouper is not None:            # curation off: dedup still needs a loop
+            tasks.append(asyncio.create_task(dedup_forever(session_factory, grouper)))
         log.info("editorial curation disabled (CURATION_ENABLED off)")
 
     if editorial_enabled():

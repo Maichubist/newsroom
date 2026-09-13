@@ -42,6 +42,11 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS significance double precision",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS curated varchar(16)",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS duplicate_of bigint",
+    # classification cache — the LLM classifier runs once per event, not per item
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS side varchar(8)",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS is_first_source boolean",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS is_rumor boolean",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS classifier_model varchar(64)",
 )
 
 

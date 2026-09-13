@@ -6,6 +6,7 @@ import datetime as dt
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -60,6 +61,14 @@ class Event(Base):
     independent_source_count: Mapped[int] = mapped_column(Integer, default=0)
 
     update_type: Mapped[str | None] = mapped_column(String(24), nullable=True)  # new_fact|confirmation|refutation|reaction|consequence|minor
+
+    # Classification cache (analyze/verify.py): the LLM classifier runs ONCE per
+    # event, not per item — reprints that join an already-classified event reuse
+    # these fields and cost nothing. classifier_model non-null = event classified.
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True)            # ua|ru|unknown
+    is_first_source: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # document/court ruling/party's own statement
+    is_rumor: Mapped[bool | None] = mapped_column(Boolean, nullable=True)         # leak-channel rumor (charter 3.7)
+    classifier_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     significance: Mapped[float | None] = mapped_column(Float, nullable=True)  # T1 gate score (analyze/significance.py)
     curated: Mapped[str | None] = mapped_column(String(16), nullable=True)  # publish|hold — editorial curation (editorial/curation.py)

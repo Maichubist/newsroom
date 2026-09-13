@@ -2,9 +2,17 @@
 
 Wires the deterministic analyzers together over a collected item:
 
-    noise filter -> classify (event? rubric? side?) -> embed + cluster into an
-    event -> gather the event's evidence (independent sources, official/reputable
-    sources) -> risk gate -> set item/event status; every decision is journalled.
+    noise filter -> embed + cluster into an event -> classify the event ONCE
+    (event? rubric? side?) -> gather the event's evidence (independent sources,
+    official/reputable sources) -> risk gate -> set item/event status; every
+    decision is journalled.
+
+Order matters for cost: embedding + clustering are cheap and run first, so the
+LLM classifier fires once per *event* rather than once per *item*. Reprint-heavy
+feeds (aggregators repost the same news) collapse many items into one event, and
+each reprint that joins an already-classified event reuses the cached
+classification and pays nothing. The deterministic noise filter still runs first,
+so obvious junk is never embedded.
 
 The two judgment steps (event-vs-noise and rubric) are a pluggable Classifier —
 an LLM in production (comparative, not absolute — CLAUDE.md), a fake in tests.
@@ -85,27 +93,30 @@ class Verifier:
                 return VerifyResult("missing", reason="item not found")
             title, text = item.title, item.text
 
-        # 1. obvious noise -> drop
+        # 1. obvious noise -> drop (deterministic, no LLM — junk is never embedded)
         noise = classify_noise(title, text, self.filters)
         if noise.is_noise:
             self._set_item_status(item_id, "filtered_out")
             self._journal("item", item_id, "filter", "noise", ",".join(noise.reasons))
             return VerifyResult("filtered_out", reason="noise:" + ",".join(noise.reasons))
 
-        # 2. event vs noise + rubric (LLM in prod)
-        cls = self.classifier.classify(title, text)
-        if not cls.is_event:
-            self._set_item_status(item_id, "filtered_out")
-            self._journal("item", item_id, "filter", "not_event", "")
-            return VerifyResult("filtered_out", reason="not_event")
-
-        # 3. embed + persist + cluster into an event
+        # 2. embed + persist + cluster into an event (cheap; runs before the LLM so
+        #    reprints collapse into one event before we pay to classify)
         vec = self.embedder.embed(f"{title or ''}\n{text or ''}")
         self._store_embedding(item_id, vec)
         assign = self.clusterer.assign(item_id, vec)
         self._set_item_status(item_id, "clustered")
 
-        # 4. event evidence + risk gate
+        # 3. classify the event ONCE (LLM in prod). Items that join an already-
+        #    classified event reuse the cached classification and cost nothing.
+        cls, newly_classified = self._classify_event(assign.event_id, title, text)
+        if not cls.is_event:
+            # the whole cluster is not a news event: drop its items, retire the event
+            self._retire_non_event(assign.event_id)
+            self._journal("item", item_id, "filter", "not_event", "")
+            return VerifyResult("filtered_out", reason="not_event")
+
+        # 4. event evidence + risk gate (re-runs per item so corroboration updates)
         event_status, level, indep = self._verify_event(assign.event_id, cls)
 
         markers = ipso_markers(title, text, self.filters)
@@ -116,6 +127,7 @@ class Verifier:
             details={
                 "event_id": assign.event_id,
                 "created_new_event": assign.created_new,
+                "newly_classified": newly_classified,
                 "similarity": round(assign.similarity, 4),
                 "rubrics": cls.rubrics,
                 "ipso_markers": markers,
@@ -125,6 +137,71 @@ class Verifier:
             model=getattr(self.classifier, "model", None),
         )
         return VerifyResult("clustered", assign.event_id, event_status)
+
+    # ------------------------------------------------------------------
+    def _classify_event(self, event_id: int, title: str | None, text: str | None) -> tuple[Classification, bool]:
+        """Classify an event once (LLM) and cache the result on the event row.
+
+        Returns (classification, newly_classified). If the event was already
+        classified — a reprint joining it — the cached fields are rebuilt into a
+        Classification with no LLM call (this is the whole cost saving). A retired
+        non-event (status filtered_out) reports is_event=False from the cache.
+        """
+        from newsroom.models import Event
+
+        with self.sf() as s:
+            event = s.get(Event, event_id)
+            if event is not None and event.classifier_model:
+                if event.status == "filtered_out":
+                    return Classification(is_event=False), False
+                return Classification(
+                    is_event=True,
+                    rubrics=[event.rubric] if event.rubric else [],
+                    side=event.side or "unknown",
+                    is_first_source=bool(event.is_first_source),
+                    is_rumor=bool(event.is_rumor),
+                ), False
+
+        cls = self.classifier.classify(title, text)
+
+        with self.sf() as s:
+            event = s.get(Event, event_id)
+            if event is not None:
+                event.side = cls.side
+                event.is_first_source = cls.is_first_source
+                event.is_rumor = cls.is_rumor
+                event.classifier_model = getattr(self.classifier, "model", "unknown")
+                s.commit()
+        self._journal(
+            "event", event_id, "classify", "event" if cls.is_event else "not_event",
+            reason=f"rubrics={','.join(cls.rubrics)} side={cls.side}",
+            details={"is_first_source": cls.is_first_source, "is_rumor": cls.is_rumor},
+            model=getattr(self.classifier, "model", None),
+        )
+        return cls, True
+
+    # ------------------------------------------------------------------
+    def _retire_non_event(self, event_id: int) -> None:
+        """The cluster classified as non-news: drop its items and take the event out
+        of the clustering pool (centroid=None) so it attracts nothing further. Rows
+        are kept, not deleted — the analytical layer is recomputable (architecture §3)."""
+        from sqlalchemy import select
+
+        from newsroom.models import Event, EventItem, Item
+
+        with self.sf() as s:
+            event = s.get(Event, event_id)
+            if event is not None:
+                event.status = "filtered_out"
+                event.centroid = None
+            item_ids = list(s.execute(
+                select(EventItem.item_id).where(EventItem.event_id == event_id)
+            ).scalars().all())
+            for iid in item_ids:
+                it = s.get(Item, iid)
+                if it is not None:
+                    it.status = "filtered_out"
+            s.commit()
 
     # ------------------------------------------------------------------
     def _verify_event(self, event_id: int, cls: Classification) -> tuple[str, str, int]:
