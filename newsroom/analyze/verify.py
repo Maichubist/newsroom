@@ -164,6 +164,11 @@ class Verifier:
             event.risk_level = level
             event.status = gate.status
             event.independent_source_count = indep
+            if not (event.title and event.title.strip()):
+                # Telegram posts often have no title (only a caption), so the event
+                # would stay title-less — breaking dedup/digest (which key off the
+                # title) and curation/log readability. Derive one from the items.
+                event.title = _derive_event_title(rows)
             s.commit()
 
         self._journal("event", event_id, "verify", gate.status, reason=gate.reason,
@@ -258,3 +263,19 @@ def _mark_item_error(session_factory, item_id: int) -> None:
                 s.commit()
     except Exception:  # noqa: BLE001 - never let the error handler itself break the tick
         logging.getLogger("newsroom.analyze.verify").exception("could not mark item error")
+
+
+def _derive_event_title(rows, *, max_len: int = 200) -> str | None:
+    """A human-readable event title from its items: the first non-empty item title,
+    else the first line/snippet of the first non-empty item text (Telegram captions).
+    `rows` is a list of (Item, Source). Pure — offline-tested."""
+    for it, _src in rows:
+        title = (getattr(it, "title", None) or "").strip()
+        if title:
+            return title[:max_len]
+    for it, _src in rows:
+        text = (getattr(it, "text", None) or "").strip()
+        if text:
+            snippet = text.splitlines()[0].strip()
+            return (snippet or text)[:max_len]
+    return None
