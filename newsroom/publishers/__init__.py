@@ -13,6 +13,7 @@ from newsroom.publishers.gate import (
 from newsroom.publishers.pipeline import Publisher, PublishOutcome
 from newsroom.publishers.supervision import Supervisor, format_publish_notice, supervision_keyboard
 from newsroom.publishers.bot import CallbackAction, SupervisionBot, parse_callback
+from newsroom.publishers.admin import AdminConsole
 from newsroom.publishers.metrics import (
     MessageStats,
     MetricsCollector,
@@ -40,7 +41,7 @@ __all__ = [
     "Publisher", "PublishOutcome",
     # supervision (§10)
     "Supervisor", "format_publish_notice", "supervision_keyboard",
-    "SupervisionBot", "CallbackAction", "parse_callback",
+    "SupervisionBot", "CallbackAction", "parse_callback", "AdminConsole",
     # metrics (§5.3)
     "MessageStats", "MetricsSource", "MetricsCollector", "TelethonMetricsSource",
     "record_publication_metric", "record_channel_metric",

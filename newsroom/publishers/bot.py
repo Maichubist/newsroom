@@ -46,9 +46,13 @@ def parse_callback(data: str | None) -> CallbackAction:
 
 
 class SupervisionBot:
-    def __init__(self, session_factory, telegram, *, charter_version: str = "0.2"):
+    def __init__(self, session_factory, telegram, *, admin_chat_id: int | None = None,
+                 console=None, charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
+        # admin_chat_id + console enable text /commands from the admin chat only.
+        self.admin_chat_id = admin_chat_id
+        self.console = console
         self.charter_version = charter_version
 
     def handle(self, action: CallbackAction) -> str:
@@ -94,18 +98,35 @@ class SupervisionBot:
         return "Відкликано" if deleted else "Позначено відкликаним (повідомлення не видалено)"
 
     def handle_update(self, update: dict) -> bool:
-        """Dispatch one Telegram update. Returns True if it was a handled callback."""
+        """Dispatch one Telegram update (callback button or admin text command).
+        Returns True if it was handled."""
         callback = update.get("callback_query")
-        if not callback:
+        if callback:
+            action = parse_callback((callback.get("data") or ""))
+            result = self.handle(action)
+            cq_id = callback.get("id")
+            if cq_id:
+                try:
+                    self.telegram.answer_callback_query(cq_id, text=result)
+                except Exception:  # noqa: BLE001
+                    log.warning("answer_callback_query failed")
+            return True
+        return self._handle_message(update.get("message") or {})
+
+    def _handle_message(self, message: dict) -> bool:
+        """Dispatch a text /command — ONLY from the admin chat (the trust boundary)."""
+        if self.console is None or self.admin_chat_id is None:
             return False
-        action = parse_callback((callback.get("data") or ""))
-        result = self.handle(action)
-        cq_id = callback.get("id")
-        if cq_id:
-            try:
-                self.telegram.answer_callback_query(cq_id, text=result)
-            except Exception:  # noqa: BLE001
-                log.warning("answer_callback_query failed")
+        chat_id = ((message.get("chat") or {}).get("id"))
+        if chat_id != self.admin_chat_id:
+            return False                      # ignore everyone but the admin
+        reply = self.console.handle(message.get("text"))
+        if reply is None:
+            return False                      # not a command
+        try:
+            self.telegram.send_text(reply, chat_id=self.admin_chat_id, disable_preview=True)
+        except Exception:  # noqa: BLE001 — a failed reply must not kill the poll loop
+            log.warning("admin reply failed")
         return True
 
     async def poll_forever(self, *, stop=None, timeout: int = 25) -> None:  # pragma: no cover - network
@@ -116,7 +137,7 @@ class SupervisionBot:
             try:
                 updates = await asyncio.to_thread(
                     self.telegram.get_updates, offset=offset, timeout=timeout,
-                    allowed_updates=["callback_query"],
+                    allowed_updates=["callback_query", "message"],
                 )
                 for update in updates:
                     offset = int(update.get("update_id", 0)) + 1

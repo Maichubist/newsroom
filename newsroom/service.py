@@ -864,12 +864,18 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if publisher.telegram.is_enabled():
         tasks.append(asyncio.create_task(publish_forever(session_factory, publisher)))
         log.info("publishing enabled")
-        if os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip():
-            from newsroom.publishers import SupervisionBot
+        admin_raw = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
+        if admin_raw:
+            from newsroom.publishers import AdminConsole, SupervisionBot
 
-            bot = SupervisionBot(session_factory, publisher.telegram)
+            try:
+                admin_id = int(admin_raw)
+            except (TypeError, ValueError):
+                admin_id = None
+            bot = SupervisionBot(session_factory, publisher.telegram, admin_chat_id=admin_id,
+                                 console=AdminConsole(session_factory))
             tasks.append(asyncio.create_task(bot.poll_forever()))
-            log.info("supervision bot enabled")
+            log.info("supervision bot + admin console enabled")
         if digest_enabled():
             tasks.append(asyncio.create_task(digest_forever(session_factory, publisher)))
             log.info("attacks digest enabled")
