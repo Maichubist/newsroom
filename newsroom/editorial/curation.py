@@ -205,12 +205,15 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         conditions.append(Event.significance >= significance_threshold)
 
     from newsroom.analyze.demand import load_demand
+    from newsroom.models import Publication
 
     with session_factory() as s:
+        have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
                    Event.significance, Event.fact_base, Event.update_type)
-            .where(*conditions).order_by(Event.significance.desc().nullslast(), Event.id).limit(limit)
+            .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
+            .order_by(Event.significance.desc().nullslast(), Event.id).limit(limit)
         ).all()
         if not rows:
             return {"curated": 0, "publish": 0, "hold": 0, "must": 0}

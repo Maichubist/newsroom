@@ -87,3 +87,26 @@ def test_reserve_attacks_marks_only_attacks(pg_engine):
         assert s.get(Event, pol_id).curated is None         # politics untouched
     # idempotent
     assert reserve_attacks(sf, CFG)["reserved"] == 0
+
+
+@pytest.mark.pg
+def test_reserve_skips_already_published_attack(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        ev = Event(status="confirmed", rubric="war", title="Ударний БпЛА атакував Черкаси",
+                   first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        s.add(Publication(event_id=ev.id, channel="telegram", kind="post", status="published",
+                          headline="h", body="b"))
+        s.flush()
+        eid = ev.id
+        s.commit()
+
+    assert reserve_attacks(sf, CFG)["reserved"] == 0        # already posted -> not folded into a digest
+    with Session(pg_engine) as s:
+        assert s.get(Event, eid).curated is None

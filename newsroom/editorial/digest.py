@@ -115,14 +115,16 @@ def reserve_attacks(session_factory, config: DigestConfig, *, window_hours: int 
     below the significance bar, but aggregated in a digest they are worth publishing."""
     from sqlalchemy import select
 
-    from newsroom.models import Decision, Event
+    from newsroom.models import Decision, Event, Publication
 
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=window_hours)
     with session_factory() as s:
+        have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.rubric, Event.title)
             .where(Event.status.in_(("reported", "confirmed", "rumor")),
                    Event.curated.is_(None), Event.duplicate_of.is_(None),
+                   Event.id.not_in(have_pub),        # already posted individually -> don't digest it too
                    Event.first_seen_at >= cutoff, Event.title.is_not(None))
             .order_by(Event.id).limit(limit)
         ).all()
