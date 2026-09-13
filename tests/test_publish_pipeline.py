@@ -428,6 +428,56 @@ def test_media_not_purged_when_no_store(pg_engine):
         assert asset.purged_at is None and asset.storage_key == "cd/cdef"
 
 
+def test_media_attaches_on_reuse_alone_when_vision_disabled(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+
+    def _seed(*, vision_block: bool):
+        with Session(pg_engine) as s:
+            src = Source(kind="rss", handle_or_url=f"https://nv/{vision_block}", name="NV",
+                         origin="ua", tier="media")
+            s.add(src)
+            s.flush()
+            it = Item(source_id=src.id, external_id=f"nv{vision_block}",
+                      content_hash=f"nv{vision_block}".ljust(64, "0"), title="t")
+            s.add(it)
+            s.flush()
+            s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200))
+            ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                       first_seen_at=dt.datetime.now(UTC))
+            s.add(ev)
+            s.flush()
+            s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+            s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"))
+            if vision_block:                      # a prior block must still be honoured
+                s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                               decision="media_vision_block"))
+            pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                              headline="Заголовок", body="Коротка новина.",
+                              features={"critic_ok": True, "is_rumor": False})
+            s.add(pub)
+            s.flush()
+            pid = pub.id
+            s.commit()
+            return pid
+
+    def _publisher_no_vision(poster):
+        tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+        return Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, require_vision=False)
+
+    # vision off + reuse clean, no vision verdict -> media attaches
+    p1 = RecordingPoster()
+    _publisher_no_vision(p1).publish_one(_seed(vision_block=False))
+    assert p1.calls[0][0] == "sendPhoto" and p1.calls[0][1]["photo"] == "http://x/pic.jpg"
+
+    # vision off but an explicit block on record -> still text only
+    p2 = RecordingPoster()
+    _publisher_no_vision(p2).publish_one(_seed(vision_block=True))
+    assert p2.calls[0][0] == "sendMessage"
+
+
 def test_publish_prefers_significant_order(pg_engine):
     # no rate cap: all curated drafts publish, but in significance order (highest first)
     from newsroom.db import make_session_factory

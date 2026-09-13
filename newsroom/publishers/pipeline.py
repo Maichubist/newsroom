@@ -60,7 +60,7 @@ def _render_send_body(pub) -> str:
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
-                 charter_version: str = "0.2"):
+                 require_vision: bool = True, charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
@@ -70,6 +70,9 @@ class Publisher:
         # purge_media_after_publish additionally deletes local files once a post is out.
         self.media_store = media_store
         self.purge_media_after_publish = bool(purge_media_after_publish)
+        # require a vision (media stop-list) verdict before attaching media. False when
+        # vision moderation is off — media then attaches on the reuse check alone.
+        self.require_vision = bool(require_vision)
         self.charter_version = charter_version
 
     # ------------------------------------------------------------------
@@ -192,10 +195,14 @@ class Publisher:
             return PublishOutcome(publication_id, published=False, reasons=["send_failed"])
 
     def _media_choice(self, s, event_id):
-        """Pick media to attach — but only for an event whose media passed BOTH
-        the §9.4 reuse check (media_clean, no media_reuse) AND the image stop-list
-        / vision check (media_vision_ok, no media_vision_block). In doubt, no
-        media (§3.5)."""
+        """Pick media to attach — only for an event whose media passed the §9.4 reuse
+        check (media_clean, no media_reuse) and the image stop-list / vision check
+        (media_vision_ok, no media_vision_block). In doubt, no media (§3.5).
+
+        When vision moderation is disabled (require_vision=False), the vision-ok
+        requirement is dropped — media attaches on the reuse check alone — but an
+        explicit media_vision_block already on record is still honoured. NOTE: this
+        relaxes the charter media stop-list; intended only for the closed test channel."""
         from sqlalchemy import select
 
         from newsroom.publishers.cascade import MediaItem, choose_media
@@ -213,7 +220,11 @@ class Publisher:
             )
         ).scalars().all())
         reuse_ok = "media_clean" in decisions and "media_reuse" not in decisions
-        vision_ok = "media_vision_ok" in decisions and "media_vision_block" not in decisions
+        vision_blocked = "media_vision_block" in decisions
+        if self.require_vision:
+            vision_ok = "media_vision_ok" in decisions and not vision_blocked
+        else:
+            vision_ok = not vision_blocked          # attach without a vision verdict
         if not (reuse_ok and vision_ok):
             return None
 

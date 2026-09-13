@@ -465,6 +465,8 @@ def build_publisher_from_env(session_factory):
     # read again). On by default; MEDIA_PURGE_AFTER_PUBLISH=false keeps them.
     media_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
     purge = os.getenv("MEDIA_PURGE_AFTER_PUBLISH", "true").strip().lower() in {"1", "true", "yes"}
+    # When vision moderation is off, don't require a vision verdict to attach media —
+    # otherwise no media could ever attach. The reuse (pHash) check still gates.
     return Publisher(
         session_factory,
         telegram=telegram,
@@ -473,6 +475,7 @@ def build_publisher_from_env(session_factory):
         supervisor=Supervisor.from_env(telegram),
         media_store=media_store,
         purge_media_after_publish=purge,
+        require_vision=media_moderation_enabled(),
     )
 
 
