@@ -79,6 +79,19 @@ def test_rumor_blocked_at_critical_allowed_below():
     assert allowed.publishable and allowed.status == STATUS_RUMOR
 
 
+def test_critical_official_waived_falls_back_to_corroboration():
+    # test-channel waiver: officiality dropped, corroboration kept
+    one = decide("critical", independent_sources=1, require_official_for_critical=False)
+    assert one.publishable is False and one.status == STATUS_SIGNAL       # single source still not enough
+    two = decide("critical", independent_sources=2, require_official_for_critical=False)
+    assert two.publishable and two.status == STATUS_REPORTED               # 2+ independent now publishes
+    first = decide("critical", has_first_source=True, require_official_for_critical=False)
+    assert first.publishable and first.status == STATUS_CONFIRMED
+    # rumors in critical stay blocked even with the waiver
+    rumor = decide("critical", is_rumor=True, require_official_for_critical=False)
+    assert rumor.publishable is False
+
+
 def test_unknown_level_raises():
     with pytest.raises(ValueError):
         decide("apocalyptic")

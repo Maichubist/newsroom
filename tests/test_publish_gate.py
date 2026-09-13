@@ -53,6 +53,14 @@ def test_gate_critical_requires_official_source():
     assert "critical_no_official" in d.reasons
 
 
+def test_gate_critical_official_waiver():
+    # test-channel waiver: the critical→official block is skipped
+    ins = GateInputs(critic_ok=True, risk_level="critical", has_official_source=False)
+    assert "critical_no_official" in evaluate_gate(ins, LIMITS).reasons
+    waived = evaluate_gate(ins, LIMITS, require_official_for_critical=False)
+    assert "critical_no_official" not in waived.reasons and waived.allow
+
+
 def test_gate_rumor_must_be_labeled():
     assert "rumor_unlabeled" in evaluate_gate(
         GateInputs(risk_level="low", is_rumor=True, rumor_labeled=False), LIMITS).reasons

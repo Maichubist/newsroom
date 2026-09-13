@@ -73,9 +73,11 @@ class GateDecision:
     reasons: list[str] = field(default_factory=list)
 
 
-def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
+def evaluate_gate(inputs: GateInputs, limits: Limits, *,
+                  require_official_for_critical: bool = True) -> GateDecision:
     """Pure decision. Returns allow=False with every reason it failed, or
-    allow=True with no reasons."""
+    allow=True with no reasons. require_official_for_critical=False waives the
+    critical→official rule (test-channel only); every other rule still applies."""
     reasons: list[str] = []
     critical = inputs.risk_level == "critical"
 
@@ -86,7 +88,7 @@ def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
         reasons.append("critic_failed")
     if inputs.stoplist_blocked:
         reasons.append("stoplist")
-    if critical and not inputs.has_official_source:
+    if critical and not inputs.has_official_source and require_official_for_critical:
         reasons.append("critical_no_official")     # war/defense: official source required
     if inputs.is_rumor:
         if critical:

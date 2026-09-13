@@ -93,8 +93,14 @@ def decide(
     has_first_source: bool = False,
     high_reputation: bool = False,
     is_rumor: bool = False,
+    require_official_for_critical: bool = True,
 ) -> GateDecision:
-    """Apply the matrix condition for `level` to the available evidence."""
+    """Apply the matrix condition for `level` to the available evidence.
+
+    require_official_for_critical=False WAIVES the charter's official-source rule for
+    critical topics (test-channel only): officiality is dropped but corroboration is
+    kept — critical then behaves like high (first-source or 2+ independent sources).
+    Rumors in critical topics stay blocked regardless."""
     if level not in LEVELS:
         raise ValueError(f"unknown risk level {level!r}")
 
@@ -108,6 +114,14 @@ def decide(
     if level == "critical":
         if has_official:
             return GateDecision(level, STATUS_CONFIRMED, True, "official source present")
+        if not require_official_for_critical:
+            # test-channel: official requirement waived -> fall back to corroboration
+            if has_first_source:
+                return GateDecision(level, STATUS_CONFIRMED, True, "first-hand source (official waived)")
+            if independent_sources >= 2:
+                return GateDecision(level, STATUS_REPORTED, True, "2+ independent sources (official waived)")
+            return GateDecision(level, STATUS_SIGNAL, False,
+                                "critical topic needs 2+ independent sources (official waived)")
         return GateDecision(level, STATUS_SIGNAL, False,
                             "critical topic requires an official source (charter 3.1)")
 

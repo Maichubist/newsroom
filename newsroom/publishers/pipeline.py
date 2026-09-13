@@ -60,7 +60,8 @@ def _render_send_body(pub) -> str:
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
-                 require_vision: bool = True, charter_version: str = "0.2"):
+                 require_vision: bool = True, require_official_for_critical: bool = True,
+                 charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
@@ -73,6 +74,8 @@ class Publisher:
         # require a vision (media stop-list) verdict before attaching media. False when
         # vision moderation is off — media then attaches on the reuse check alone.
         self.require_vision = bool(require_vision)
+        # test-channel: waive the critical→official publish rule (charter floor otherwise)
+        self.require_official_for_critical = bool(require_official_for_critical)
         self.charter_version = charter_version
 
     # ------------------------------------------------------------------
@@ -150,7 +153,8 @@ class Publisher:
             media_choice = self._media_choice(s, pub.event_id)
             reply_to_pub_id, reply_to_message_id = self._story_reply_target(s, event)
 
-        decision = evaluate_gate(inputs, self.limits)
+        decision = evaluate_gate(inputs, self.limits,
+                                 require_official_for_critical=self.require_official_for_critical)
         if not decision.allow:
             self._record_block(publication_id, decision.reasons)
             return PublishOutcome(publication_id, published=False, reasons=decision.reasons)
