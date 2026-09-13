@@ -159,16 +159,21 @@ class Publisher:
             self._record_block(publication_id, decision.reasons)
             return PublishOutcome(publication_id, published=False, reasons=decision.reasons)
 
-        # Telegram-origin media has no URL — upload the stored bytes. If they can't be
-        # read, drop the media and post as text rather than failing the publish.
-        media_file = None
-        if media_choice is not None and not media_choice.url and media_choice.storage_key:
-            media_file = self._media_file(media_choice)
-            if media_file is None:
-                media_choice = None
+        # Prefer uploading the locally stored bytes over sending a URL: Telegram often
+        # cannot fetch a source URL (telesco.pe / hotlink-protected images 400 with
+        # "failed to get HTTP URL content"). If there is no file and no fetchable URL,
+        # drop the media.
+        media_file = self._media_file(media_choice) if media_choice is not None else None
+        if media_choice is not None and media_file is None and not media_choice.url:
+            media_choice = None
 
         result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id,
                                          file=media_file)
+        if not result.ok and media_choice is not None:
+            # a post must never be lost to a bad image — retry once as text only
+            log.warning("media send failed; retrying as text",
+                        extra={"publication_id_": publication_id, "error": result.error})
+            result = self.telegram.send_post(body, None, reply_to_message_id=reply_to_message_id)
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
@@ -248,8 +253,9 @@ class Publisher:
         return choose_media(items)
 
     def _media_file(self, choice):
-        """Read a url-less choice's stored bytes for upload (filename, bytes), or None
-        if there is no store or the file is gone (caller then posts text)."""
+        """Read the choice's locally stored bytes for upload (filename, bytes), or None
+        if there is no store or the file is gone (caller then sends the URL, or text).
+        Uploading the bytes is preferred over a URL — Telegram can't always fetch it."""
         if self.media_store is None or not choice.storage_key:
             return None
         data = self.media_store.get(choice.storage_key)

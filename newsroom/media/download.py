@@ -22,10 +22,14 @@ DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 _DOWNLOADABLE_ITEM_STATUSES = ("accepted", "clustered")
 
 
+_USER_AGENT = "Mozilla/5.0 (compatible; newsroom/0.1; +https://example.org)"
+
+
 def _http_fetch(url: str, *, timeout: float = 20.0) -> bytes:  # pragma: no cover - network
     import httpx
 
-    resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+    resp = httpx.get(url, timeout=timeout, follow_redirects=True,
+                     headers={"User-Agent": _USER_AGENT})
     resp.raise_for_status()
     return resp.content
 

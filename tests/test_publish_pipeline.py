@@ -356,6 +356,94 @@ def test_telegram_media_uploaded_as_file(pg_engine):
     assert payload["_file"]["data"] == b"\xff\xd8\xffphoto-bytes"
 
 
+def test_url_media_prefers_local_upload_when_downloaded(pg_engine):
+    # RSS media with a URL but also a downloaded file -> upload the bytes (Telegram
+    # can't always fetch the URL), don't send the URL.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://mm/up", name="MM", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="up1", content_hash="up1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200,
+                         storage_key="ef/gh"))
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    poster = RecordingPoster()
+    store = FakeStore({"ef/gh": b"\xff\xd8\xffpic"})
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, media_store=store).publish_one(pid)
+    method, payload = poster.calls[0]
+    assert method == "sendPhoto" and "photo" not in payload      # uploaded, not sent by URL
+    assert payload["_file"]["data"] == b"\xff\xd8\xffpic"
+
+
+def test_media_send_failure_falls_back_to_text(pg_engine):
+    # Telegram rejects the photo (can't fetch the URL) -> the post still goes out as text
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    class PhotoFailsPoster:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, method, payload):
+            self.calls.append((method, payload))
+            if method == "sendPhoto":
+                return {"ok": False, "description": "Bad Request: failed to get HTTP URL content"}
+            return {"ok": True, "result": {"message_id": 900 + len(self.calls)}}
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://mm/fb", name="MM", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="fb1", content_hash="fb1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/unfetchable.jpg", width=1200))
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    poster = PhotoFailsPoster()
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    outcome = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS).publish_one(pid)
+    assert outcome.published is True                                  # not lost
+    assert poster.calls[0][0] == "sendPhoto" and poster.calls[1][0] == "sendMessage"  # retried as text
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "published"
+
+
 def test_telegram_media_falls_back_to_text_when_file_missing(pg_engine):
     # stored file gone (e.g. purged) -> drop media, post as text, do NOT fail the publish
     from newsroom.db import make_session_factory
