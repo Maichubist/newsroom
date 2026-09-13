@@ -167,7 +167,7 @@ def test_all_canned_commands_run_without_error(pg_engine):
     from newsroom.db import make_session_factory
 
     console = AdminConsole(make_session_factory(pg_engine))
-    for cmd in ("/stats", "/pub", "/pub 3", "/demand", "/sources", "/top", "/top 5", "/media"):
+    for cmd in ("/stats", "/pub", "/pub 3", "/demand", "/topics", "/topics 5", "/sources", "/top", "/top 5", "/media"):
         out = console.handle(cmd)
         assert isinstance(out, str) and out
         assert "помилка команди" not in out          # no dispatch crash
@@ -185,3 +185,18 @@ def test_report_demand_empty_then_filled(pg_engine):
         s.commit()
     out = AdminConsole(sf).handle("/demand")
     assert "politics" in out and "0.90" in out
+
+
+@pytest.mark.pg
+def test_report_topics_empty_then_filled(pg_engine):
+    from newsroom.analyze.topics import store_hot_topics
+    from newsroom.db import make_session_factory
+
+    sf = make_session_factory(pg_engine)
+    assert "ще нема" in AdminConsole(sf).handle("/topics")
+    with Session(pg_engine) as s:
+        store_hot_topics(s, {"topics": [{"topic": "дрон", "events": 3, "posts": 5, "heat": 0.9}],
+                             "heat": {"дрон": 0.9}, "at": "2026-09-13T00:00:00+00:00"})
+        s.commit()
+    out = AdminConsole(sf).handle("/topics")
+    assert "дрон" in out

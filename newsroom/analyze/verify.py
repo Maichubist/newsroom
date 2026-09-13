@@ -38,6 +38,7 @@ class Classification:
     side: str = "unknown"           # ua | ru | unknown (for scoped stop-list rules)
     is_first_source: bool = False   # document / court ruling / party's own statement
     is_rumor: bool = False          # leak-channel rumor (charter 3.7)
+    keywords: list[str] = field(default_factory=list)   # 5-10 topic keywords (hot-topics layer)
 
 
 class Classifier(Protocol):
@@ -163,6 +164,7 @@ class Verifier:
                     side=event.side or "unknown",
                     is_first_source=bool(event.is_first_source),
                     is_rumor=bool(event.is_rumor),
+                    keywords=list(event.keywords or []),
                 ), False
 
         cls = self.classifier.classify(title, text)
@@ -173,6 +175,7 @@ class Verifier:
                 event.side = cls.side
                 event.is_first_source = cls.is_first_source
                 event.is_rumor = cls.is_rumor
+                event.keywords = list(cls.keywords) or None
                 event.classifier_model = getattr(self.classifier, "model", "unknown")
                 s.commit()
         self._journal(

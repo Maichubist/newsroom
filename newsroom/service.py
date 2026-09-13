@@ -107,6 +107,10 @@ def demand_metrics_enabled() -> bool:
     return os.getenv("DEMAND_METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def topics_enabled() -> bool:
+    return os.getenv("TOPICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def metrics_enabled() -> bool:
     return os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -680,6 +684,23 @@ async def demand_forever(session_factory, collector, *, tick_seconds: float = 18
         await asyncio.sleep(tick_seconds)
 
 
+async def topics_forever(session_factory, *, tick_seconds: float = 1800.0,
+                         window_hours: int = 48, stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Recompute the data-driven hot-topics index from event keywords + competitor
+    engagement, so curation and the admin console can read it. DB-only, no LLM
+    (keywords are extracted upstream in verify). Nothing is published."""
+    from newsroom.analyze.topics import refresh_hot_topics
+
+    while not (stop and stop.is_set()):
+        try:
+            result = await asyncio.to_thread(refresh_hot_topics, session_factory, window_hours=window_hours)
+            if result.get("topics"):
+                log.info("hot topics", extra=bind(topics=len(result["topics"])))
+        except Exception:
+            log.exception("topics tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def metrics_forever(session_factory, collector, channel_chat_id, *,
                           tick_seconds: float = 600.0, channel_every: int = 6,
                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
@@ -924,6 +945,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
             log.info("demand metrics disabled (needs telegram collection)")
     else:
         log.info("demand metrics disabled (DEMAND_METRICS_ENABLED off)")
+
+    if topics_enabled():
+        tasks.append(asyncio.create_task(topics_forever(session_factory)))
+        log.info("hot topics enabled")
+    else:
+        log.info("hot topics disabled (TOPICS_ENABLED off)")
 
     await asyncio.gather(*tasks)
 

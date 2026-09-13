@@ -69,7 +69,8 @@ class Candidate:
     risk_level: str | None = None
     significance: float | None = None
     facts: list[str] = field(default_factory=list)
-    demand: float | None = None        # learned audience demand for the topic (0..1), or None
+    demand: float | None = None        # learned audience demand for the rubric (0..1), or None
+    heat: float | None = None          # data-driven hot-topic heat for this event (0..1), or None
 
 
 def _demand_label(demand: float | None) -> str:
@@ -80,6 +81,16 @@ def _demand_label(demand: float | None) -> str:
     if demand >= 0.33:
         return "середній"
     return "низький"
+
+
+def _heat_label(heat: float | None) -> str:
+    if not heat:
+        return "—"
+    if heat >= 0.66:
+        return "гаряча"
+    if heat >= 0.33:
+        return "тепла"
+    return "прохолодна"
 
 
 def parse_ranking(raw: str | None, valid_ids: set[int]) -> dict[int, str]:
@@ -120,12 +131,15 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 справді варте публікації просто зараз, а що — ні. Будь вибагливим: краще менше, але
 вагоме. Це не стрічка всього підряд.
 
-Зважуй ДВА рівнозначні чинники:
+Зважуй чинники:
 - ВАЖЛИВІСТЬ: суспільна вага для українського читача (політика, безпека/фронт,
   економіка, важливі рішення, помітні міжнародні події, що нас стосуються).
-- ПОПИТ АУДИТОРІЇ: наскільки тема цікавить масового читача («попит» біля кандидата —
+- ПОПИТ АУДИТОРІЇ: наскільки рубрика цікавить масового читача («попит» біля кандидата —
   вивчений із реакцій на схожі новини в інших каналах). Важливе, але буденне (щоденні
   зведення роками) читач гортає повз; свіже й резонансне — читає.
+- ГАРЯЧІСТЬ ТЕМИ: «тема» біля кандидата — наскільки саме цей сюжет зараз активно
+  обговорюють у стрічці конкурентів (гаряча = багато постів + залученість зараз).
+  Гаряча тема — сильний сигнал на користь публікації, поки вона в тренді.
 
 ПРИТРИМАти (hold) — дрібне, вузьконішеве, прохідне, дубль уже відомого, суто
 розважальне без ширшого значення, або важливе-але-рутинне з низьким попитом.
@@ -148,7 +162,7 @@ def _render_candidates(candidates: list[Candidate]) -> str:
     lines: list[str] = []
     for c in candidates:
         head = (f"[id={c.event_id}] ({c.rubric or '?'}/{c.risk_level or '?'}, "
-                f"попит: {_demand_label(c.demand)}) {c.title.strip()}")
+                f"попит: {_demand_label(c.demand)}, тема: {_heat_label(c.heat)}) {c.title.strip()}")
         lines.append(head)
         for f in c.facts[:3]:
             if f and f.strip():
@@ -224,13 +238,14 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         conditions.append(Event.significance >= significance_threshold)
 
     from newsroom.analyze.demand import load_demand
+    from newsroom.analyze.topics import load_hot_topics, topic_heat
     from newsroom.models import Publication
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
-                   Event.significance, Event.fact_base, Event.update_type)
+                   Event.significance, Event.fact_base, Event.update_type, Event.keywords)
             .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
             .order_by(Event.significance.desc().nullslast(), Event.id).limit(limit)
         ).all()
@@ -246,10 +261,11 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             .distinct()
         ).scalars().all())
         demand_by_rubric = load_demand(s)      # learned audience demand per rubric ({} until data)
+        hot = load_hot_topics(s)               # data-driven hot-topic heat ({} until data)
 
     decisions: dict[int, str] = {}
     to_rank: list[Candidate] = []
-    for eid, title, rubric, risk, sig, fact_base, update_type in rows:
+    for eid, title, rubric, risk, sig, fact_base, update_type, keywords in rows:
         # an individual loss/obituary must go through the editor (not the must-publish
         # fast path), so an unknown-person memorial can be held
         memorial = _is_memorial(title)
@@ -259,7 +275,8 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         else:
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
                                      significance=sig, facts=_facts_brief(fact_base),
-                                     demand=demand_by_rubric.get(rubric) if rubric else None))
+                                     demand=demand_by_rubric.get(rubric) if rubric else None,
+                                     heat=topic_heat(keywords, hot) or None))
     must_count = len(decisions)
 
     if to_rank:

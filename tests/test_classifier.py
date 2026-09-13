@@ -27,3 +27,13 @@ def test_parse_clamps_side_and_defaults_missing_fields():
     assert c.is_event is False
     assert c.side == "unknown"          # invalid side clamped
     assert c.rubrics == [] and c.is_rumor is False and c.is_first_source is False
+    assert c.keywords == []             # missing keywords -> empty
+
+
+def test_parse_keywords_extracted_and_capped():
+    kws = [f"тема{i}" for i in range(15)]
+    import json
+    c = parse_classification(json.dumps({"is_event": True, "keywords": kws + ["", "  "]}))
+    assert c is not None
+    assert c.keywords[:3] == ["тема0", "тема1", "тема2"]
+    assert len(c.keywords) == 10        # capped at 10, blanks dropped

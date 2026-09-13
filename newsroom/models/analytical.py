@@ -69,6 +69,7 @@ class Event(Base):
     is_first_source: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # document/court ruling/party's own statement
     is_rumor: Mapped[bool | None] = mapped_column(Boolean, nullable=True)         # leak-channel rumor (charter 3.7)
     classifier_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)           # 5-10 topic keywords (data-driven hot-topics layer)
 
     significance: Mapped[float | None] = mapped_column(Float, nullable=True)  # T1 gate score (analyze/significance.py)
     curated: Mapped[str | None] = mapped_column(String(16), nullable=True)  # publish|hold — editorial curation (editorial/curation.py)

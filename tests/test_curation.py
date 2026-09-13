@@ -131,6 +131,28 @@ def test_curate_pending_passes_learned_demand_to_ranker(pg_engine):
 
 
 @pytest.mark.pg
+def test_curate_pending_attaches_topic_heat_to_ranker(pg_engine):
+    from newsroom.analyze.topics import store_hot_topics
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="Подія",
+                   significance=0.8, keywords=["дрон", "покровськ"], first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        eid = ev.id
+        store_hot_topics(s, {"heat": {"дрон": 0.9}, "topics": [], "at": now.isoformat()})
+        s.commit()
+
+    ranker = FakeRanker({eid: "publish"})
+    curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
+    assert ranker.candidates and ranker.candidates[0].heat == pytest.approx(0.9)   # hottest keyword
+
+
+@pytest.mark.pg
 def test_curate_pending_must_publish_bypasses_ranker_and_ranks_the_rest(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Event, EventItem, Item, Source

@@ -30,6 +30,11 @@ DEFAULT_PROMPT = """Ти редактор українського новинн�
 - is_first_source: boolean — це першоджерело (документ, рішення суду, заява самої
   сторони), а не переказ.
 - is_rumor: boolean — це неофіційна чутка зі зливного каналу.
+- keywords: масив із 5–10 конкретних тем/сутностей матеріалу для аналітики трендів —
+  ключові особи, організації, місця, події, явища. Українською, у називному відмінку
+  однини (базова форма: "дрон", "Покровськ", "мобілізація", "Зеленський"). Без
+  службових слів і загальників ("новина", "Україна", "сьогодні"). Синоніми зводь до
+  одного слова ("шахед"/"безпілотник" → "дрон").
 
 Матеріал:
 {news_text}"""
@@ -49,12 +54,15 @@ def parse_classification(raw: str | None) -> Classification | None:
     if side not in _SIDES:
         side = "unknown"
     rubrics = [str(r).strip().lower() for r in (obj.get("rubrics") or []) if str(r).strip()]
+    kw_raw = obj.get("keywords") or []
+    keywords = [str(k).strip() for k in kw_raw if str(k).strip()][:10] if isinstance(kw_raw, list) else []
     return Classification(
         is_event=bool(obj.get("is_event")),
         rubrics=rubrics,
         side=side,
         is_first_source=bool(obj.get("is_first_source")),
         is_rumor=bool(obj.get("is_rumor")),
+        keywords=keywords,
     )
 
 

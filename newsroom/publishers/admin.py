@@ -179,6 +179,20 @@ def report_publications(session_factory, *, limit: int = 10) -> str:
     return _pre(_table(["pub", "event", "headline", "utc"], data))
 
 
+def report_topics(session_factory, *, limit: int = 25) -> str:
+    from newsroom.analyze.topics import load_hot_topics_detail
+
+    with session_factory() as s:
+        topics = load_hot_topics_detail(s)
+    if not topics:
+        return ("Гарячих тем ще нема (потрібні події з ключовими словами; "
+                "TOPICS_ENABLED + класифікатор).")
+    rows = [[t.get("topic", ""), t.get("events", 0), t.get("posts", 0), f"{t.get('heat', 0):.2f}"]
+            for t in topics[:limit]]
+    return _pre("Гарячі теми (з постів конкурентів)\n\n"
+                + _table(["тема", "події", "пости", "heat"], rows))
+
+
 def report_demand(session_factory) -> str:
     from newsroom.analyze.demand import load_demand
 
@@ -321,6 +335,7 @@ HELP = (
     "🛠 Команди адмін-консолі\n"
     "/stats — стан пайплайна\n"
     "/pub [N] — останні опубліковані пости\n"
+    "/topics [N] — гарячі теми з постів конкурентів\n"
     "/demand — індекс попиту за рубриками\n"
     "/sources — джерела-конкуренти й підписники\n"
     "/top [N] — топ постів конкурентів за залученістю\n"
@@ -366,6 +381,8 @@ class AdminConsole:
             return report_stats(self.sf)
         if cmd == "pub":
             return report_publications(self.sf, limit=_int(args, 10, lo=1, hi=30))
+        if cmd == "topics":
+            return report_topics(self.sf, limit=_int(args, 25, lo=1, hi=50))
         if cmd == "demand":
             return report_demand(self.sf)
         if cmd == "sources":
