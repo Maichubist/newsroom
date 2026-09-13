@@ -42,6 +42,30 @@ def _is_denied_media(url: str | None) -> bool:
     return bool(u) and any(bad in u for bad in _MEDIA_URL_DENY)
 
 
+# Ukraine-relevance pre-filter for foreign (origin: world) feeds: we ingest only
+# their Ukraine-related items, before embedding, so the bulk of foreign noise never
+# costs a classify/embed call. General world news comes from aggregators instead.
+# Latin + German + Cyrillic forms; matched case-insensitively on title+text.
+_UKRAINE_RE = re.compile(
+    r"ukrain|україн|zelens|selensk|зеленськ|"
+    r"kyiv|kiev|kiew|київ|києв|kharkiv|kharkov|charkiw|харків|харков|"
+    r"odesa|odessa|одес|donetsk|донец|luhansk|lugansk|луган|zaporizh|запоріж|запор|"
+    r"kherson|херсон|mariupol|маріупол|crimea|крим|donbas|донбас|azov|азов|обстріл|"
+    r"pokrovsk|покровс|bakhmut|бахмут|kramatorsk|краматор",
+    re.IGNORECASE,
+)
+
+
+def mentions_ukraine(title: str | None, text: str | None) -> bool:
+    """True if the item looks Ukraine-related (for the world-feed pre-filter)."""
+    return bool(_UKRAINE_RE.search(f"{title or ''}\n{text or ''}"))
+
+
+def world_ukraine_only() -> bool:
+    """For origin=world feeds, ingest only Ukraine-related items (default on)."""
+    return os.getenv("WORLD_UKRAINE_ONLY", "true").strip().lower() in {"1", "true", "yes"}
+
+
 def _strip_html(value: str | None) -> str | None:
     if not value:
         return None
@@ -177,7 +201,7 @@ class RssCollector:
             src = s.get(Source, source_id)
             if src is None:
                 return CollectResult(source_id, ok=False, error="source not found")
-            handle, default_lang = src.handle_or_url, src.lang
+            handle, default_lang, origin = src.handle_or_url, src.lang, src.origin
 
         try:
             raw = self._fetch(handle)  # network happens outside any DB transaction
@@ -193,6 +217,9 @@ class RssCollector:
         now = dt.datetime.now(dt.timezone.utc)
         max_age = collect_max_age_hours()
         items = [ri for ri in items if is_recent(ri.published_at, now, max_age)]
+        # foreign feeds: keep only Ukraine-related items, before any embedding/classify
+        if origin == "world" and world_ukraine_only():
+            items = [ri for ri in items if mentions_ukraine(ri.title, ri.text)]
         created = updated = 0
         with self.session_factory() as s:
             src = s.get(Source, source_id)

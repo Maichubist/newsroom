@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from newsroom.collectors.rss import _is_denied_media, parse_feed
+from newsroom.collectors.rss import _is_denied_media, mentions_ukraine, parse_feed
+
+
+def test_mentions_ukraine_matches_forms():
+    assert mentions_ukraine("Zelensky meets allies", None) is True
+    assert mentions_ukraine("Russland greift Charkiw an", None) is True     # German form
+    assert mentions_ukraine(None, "Обстріл Києва вночі") is True            # Cyrillic
+    assert mentions_ukraine("Drone strike near Pokrovsk", "") is True
+    assert mentions_ukraine("US election results", "Trump wins Ohio") is False
+    assert mentions_ukraine("Apple unveils new iPhone", None) is False
 
 _PLACEHOLDER_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel><title>t</title>
