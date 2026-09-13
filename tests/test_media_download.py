@@ -86,6 +86,16 @@ def test_media_key_is_stable_and_distinct():
     assert media_key(1, 2, "u") != media_key(1, 3, "u")
 
 
+def test_local_store_delete_is_idempotent_and_prunes_shard(tmp_path):
+    store = LocalMediaStore(tmp_path)
+    key = media_key(1, 2, "http://x/a.jpg")
+    store.put(key, b"bytes")
+    assert store.delete(key) is True          # deleted
+    assert not store.exists(key)
+    assert not (tmp_path / key).parent.exists()   # empty shard dir pruned
+    assert store.delete(key) is False         # already gone -> idempotent
+
+
 # --- MediaDownloader (pg) -----------------------------------------------------
 
 def _seed_asset(pg_engine, *, item_status="accepted", url="http://x/a.jpg", kind="image"):

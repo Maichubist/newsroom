@@ -243,6 +243,102 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
     assert p3.calls[0][0] == "sendPhoto" and p3.calls[0][1]["photo"] == "http://x/pic.jpg"
 
 
+class FakeStore:
+    """Records deletes so the test can assert the local file was purged."""
+
+    def __init__(self):
+        self.deleted: list[str] = []
+
+    def put(self, key, data):  # pragma: no cover - unused here
+        return key
+
+    def exists(self, key):  # pragma: no cover - unused here
+        return key not in self.deleted
+
+    def delete(self, key):
+        self.deleted.append(key)
+        return True
+
+
+def test_local_media_deleted_after_publish(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    store = FakeStore()
+
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://mm/purge", name="MM", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="ip", content_hash="hp".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        # a downloaded asset (storage_key set) and a not-yet-downloaded one (skipped)
+        downloaded = MediaAsset(item_id=it.id, kind="image", url="http://x/p.jpg",
+                                width=1200, storage_key="ab/abcd", phash="p1")
+        pending = MediaAsset(item_id=it.id, kind="image", url="http://x/q.jpg", width=1200)
+        s.add_all([downloaded, pending])
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid, downloaded_id, pending_id = pub.id, downloaded.id, pending.id
+        s.commit()
+
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, media_store=store)
+    assert publisher.publish_one(pid).published is True
+
+    assert store.deleted == ["ab/abcd"]        # only the downloaded file was deleted
+    with Session(pg_engine) as s:
+        d = s.get(MediaAsset, downloaded_id)
+        assert d.storage_key == "ab/abcd"       # key kept so nothing re-downloads
+        assert d.purged_at is not None          # marked gone-locally
+        assert s.get(MediaAsset, pending_id).purged_at is None   # never downloaded -> untouched
+
+
+def test_media_not_purged_when_no_store(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://mm/nopurge", name="MM", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="inp", content_hash="hnp".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        asset = MediaAsset(item_id=it.id, kind="image", url="http://x/p.jpg", storage_key="cd/cdef")
+        s.add(asset)
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid, asset_id = pub.id, asset.id
+        s.commit()
+
+    poster = RecordingPoster()
+    assert _publisher(sf, poster).publish_one(pid).published is True   # no media_store -> no purge
+    with Session(pg_engine) as s:
+        asset = s.get(MediaAsset, asset_id)
+        assert asset.purged_at is None and asset.storage_key == "cd/cdef"
+
+
 def test_publish_prefers_significant_order(pg_engine):
     # no rate cap: all curated drafts publish, but in significance order (highest first)
     from newsroom.db import make_session_factory

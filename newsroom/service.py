@@ -458,12 +458,20 @@ def build_publisher_from_env(session_factory):
     from newsroom.publishers import Publisher, Supervisor, TelegramPublisher, load_limits
 
     telegram = TelegramPublisher.from_env()
+    # Delete local media files right after a post goes out (they are sent by URL and
+    # never read locally again). On by default; MEDIA_PURGE_AFTER_PUBLISH=false keeps them.
+    media_store = None
+    if os.getenv("MEDIA_PURGE_AFTER_PUBLISH", "true").strip().lower() in {"1", "true", "yes"}:
+        from newsroom.media import LocalMediaStore
+
+        media_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
     return Publisher(
         session_factory,
         telegram=telegram,
         stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
         limits=load_limits(CONFIG_DIR / "limits.yaml"),
         supervisor=Supervisor.from_env(telegram),
+        media_store=media_store,
     )
 
 

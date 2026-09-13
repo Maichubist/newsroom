@@ -113,6 +113,10 @@ class MediaAsset(Base):
 
     phash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # reused-image search
     storage_key: Mapped[str | None] = mapped_column(Text, nullable=True)  # set only after download (post-filter)
+    # Set when the local file was deleted after publication (the bytes are sent to
+    # Telegram by URL and never read locally again; the phash reuse-archive lives in
+    # the DB). storage_key is kept so nothing re-downloads; purged_at means gone-locally.
+    purged_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     item: Mapped["Item"] = relationship(back_populates="media")

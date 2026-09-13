@@ -59,12 +59,13 @@ def _render_send_body(pub) -> str:
 
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
-                 supervisor=None, charter_version: str = "0.2"):
+                 supervisor=None, media_store=None, charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
         self.limits = limits
         self.supervisor = supervisor
+        self.media_store = media_store   # when set, local media is deleted after publish
         self.charter_version = charter_version
 
     # ------------------------------------------------------------------
@@ -167,6 +168,7 @@ class Publisher:
                 ))
                 s.commit()
                 self._notify_supervisor(publication_id, headline, inputs, result.message_id)
+                self._purge_media(pub.event_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
             s.add(Decision(
                 entity_type="publication", entity_id=str(publication_id), stage="publish",
@@ -241,6 +243,18 @@ class Publisher:
             return pub_id, int(channel_ref)
         except (TypeError, ValueError):
             return pub_id, None
+
+    def _purge_media(self, event_id) -> None:
+        """Delete the event's local media files right after a successful publish
+        (opt-in via media_store). A cleanup failure must never fail the publish."""
+        if self.media_store is None or event_id is None:
+            return
+        try:
+            from newsroom.media import purge_event_media
+
+            purge_event_media(self.sf, self.media_store, event_id)
+        except Exception:  # noqa: BLE001 - cleanup is best-effort
+            log.exception("post-publish media purge failed")
 
     def _notify_supervisor(self, publication_id, headline, inputs: GateInputs, message_id) -> None:
         if self.supervisor is None:

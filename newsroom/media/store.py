@@ -16,6 +16,8 @@ class MediaStore(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
+    def delete(self, key: str) -> bool: ...
+
 
 def media_key(item_id: int, media_id: int, url: str) -> str:
     """A stable, collision-resistant storage key for one media asset."""
@@ -37,3 +39,17 @@ class LocalMediaStore:
 
     def exists(self, key: str) -> bool:
         return (self.base_dir / key).exists()
+
+    def delete(self, key: str) -> bool:
+        """Remove the stored file. Idempotent: returns True if a file was deleted,
+        False if it was already gone. Prunes the now-empty shard directory."""
+        path = self.base_dir / key
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        try:
+            path.parent.rmdir()   # drop the 2-char shard dir if it is now empty
+        except OSError:
+            pass                  # not empty (other files share the shard) — leave it
+        return True
