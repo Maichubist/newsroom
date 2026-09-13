@@ -64,6 +64,10 @@ def curation_enabled() -> bool:
     return os.getenv("CURATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def digest_enabled() -> bool:
+    return os.getenv("DIGEST_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def editorial_enabled() -> bool:
     return os.getenv("EDITORIAL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -392,6 +396,24 @@ async def curation_forever(session_factory, ranker, *, significance_threshold: f
                 log.info("curation tick", extra=bind(**stats))
         except Exception:
             log.exception("curation tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
+async def digest_forever(session_factory, publisher, *, tick_seconds: float = 300.0,
+                         stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Reserve attack events and, at each window's publish time (Kyiv), post one
+    combined 'Обстріли за ніч/день' digest instead of many individual posts."""
+    from newsroom.editorial import load_digest_config, publish_due_digests, reserve_attacks
+
+    config = load_digest_config(CONFIG_DIR / "digest.yaml")
+    while not (stop and stop.is_set()):
+        try:
+            await asyncio.to_thread(reserve_attacks, session_factory, config)
+            stats = await asyncio.to_thread(publish_due_digests, session_factory, config, publisher)
+            if stats.get("digests"):
+                log.info("digest tick", extra=bind(**stats))
+        except Exception:
+            log.exception("digest tick failed")
         await asyncio.sleep(tick_seconds)
 
 
@@ -778,6 +800,11 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
             bot = SupervisionBot(session_factory, publisher.telegram)
             tasks.append(asyncio.create_task(bot.poll_forever()))
             log.info("supervision bot enabled")
+        if digest_enabled():
+            tasks.append(asyncio.create_task(digest_forever(session_factory, publisher)))
+            log.info("attacks digest enabled")
+        else:
+            log.info("attacks digest disabled (DIGEST_ENABLED off)")
     else:
         log.info("publishing disabled (PUBLISH_ENABLED off or no credentials)")
 
