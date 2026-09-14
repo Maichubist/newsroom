@@ -70,6 +70,10 @@ class Event(Base):
     is_rumor: Mapped[bool | None] = mapped_column(Boolean, nullable=True)         # leak-channel rumor (charter 3.7)
     classifier_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)           # 5-10 topic keywords (data-driven hot-topics layer)
+    # learned taxonomy pyramid (charter v0.3 §3.1): the broad->specific topic path and
+    # the id of its leaf node in taxonomy_nodes (for engagement roll-up up the tree).
+    topic_path: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    topic_leaf_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
 
     significance: Mapped[float | None] = mapped_column(Float, nullable=True)  # T1 gate score (analyze/significance.py)
     curated: Mapped[str | None] = mapped_column(String(16), nullable=True)  # publish|hold — editorial curation (editorial/curation.py)
@@ -85,6 +89,24 @@ class Event(Base):
     story: Mapped["Story | None"] = relationship(back_populates="events")
     items: Mapped[list["EventItem"]] = relationship(back_populates="event")
     claims: Mapped[list["Claim"]] = relationship(back_populates="event")
+
+
+class TaxonomyNode(Base):
+    """A node in the learned topic pyramid (charter v0.3 §3.1). The tree is built from
+    the topic paths the classifier emits per event — not hand-authored. `parent_id` is
+    NULL for a top-level node; `slug` is the normalized label, unique among siblings so
+    the same path always maps to the same node chain. `depth` is 0 at the root level."""
+
+    __tablename__ = "taxonomy_nodes"
+    __table_args__ = (UniqueConstraint("parent_id", "slug", name="uq_taxonomy_parent_slug"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("taxonomy_nodes.id"), nullable=True, index=True)
+    slug: Mapped[str] = mapped_column(String(120))          # normalized label (match key)
+    label: Mapped[str] = mapped_column(String(200))         # display label as first seen
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    event_count: Mapped[int] = mapped_column(Integer, default=0)   # how many events reference this node (incl. via descendants roll-up done at query time)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class EventItem(Base):

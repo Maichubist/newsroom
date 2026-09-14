@@ -39,6 +39,9 @@ class Classification:
     is_first_source: bool = False   # document / court ruling / party's own statement
     is_rumor: bool = False          # leak-channel rumor (charter 3.7)
     keywords: list[str] = field(default_factory=list)   # 5-10 topic keywords (hot-topics layer)
+    # broad->specific topic path for the learned taxonomy pyramid (charter v0.3 §3.1),
+    # e.g. ["війна", "атака рф", "удар бпла", "одеса"]. Emergent, not a fixed list.
+    topic_path: list[str] = field(default_factory=list)
 
 
 class Classifier(Protocol):
@@ -170,6 +173,7 @@ class Verifier:
                     is_first_source=bool(event.is_first_source),
                     is_rumor=bool(event.is_rumor),
                     keywords=list(event.keywords or []),
+                    topic_path=list(event.topic_path or []),
                 ), False
 
         cls = self.classifier.classify(title, text)
@@ -181,6 +185,12 @@ class Verifier:
                 event.is_first_source = cls.is_first_source
                 event.is_rumor = cls.is_rumor
                 event.keywords = list(cls.keywords) or None
+                # learned taxonomy: record the path and link the event to its leaf node,
+                # building the tree from data (charter v0.3 §3.1)
+                event.topic_path = list(cls.topic_path) or None
+                if cls.is_event and cls.topic_path:
+                    from newsroom.analyze.taxonomy import ingest_path
+                    event.topic_leaf_id = ingest_path(s, cls.topic_path)
                 event.classifier_model = getattr(self.classifier, "model", "unknown")
                 s.commit()
         self._journal(

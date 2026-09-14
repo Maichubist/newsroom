@@ -196,3 +196,23 @@ def test_decisions_are_journalled(pg_engine):
     with Session(pg_engine) as s:
         rows = s.execute(select(Decision).where(Decision.entity_type == "item", Decision.entity_id == str(iid))).scalars().all()
         assert any(d.stage == "verify" and d.charter_version == "0.3" for d in rows)
+
+
+def test_verify_records_topic_path_and_leaf(pg_engine):
+    # the classifier's learned topic path lands on the event and links a taxonomy leaf node
+    from newsroom.models import TaxonomyNode
+
+    with Session(pg_engine) as s:
+        sid = _source(s, "vrf-taxo")
+        iid = _item(s, sid, "t1", "Ударний БпЛА по Одесі", "Внаслідок удару БпЛА в Одесі пошкоджено будівлю.")
+        s.commit()
+    v = _verifier(pg_engine, Classification(
+        is_event=True, rubrics=["war"], topic_path=["війна", "атака рф", "удар бпла", "одеса"]))
+    v.verify_item(iid)
+    with Session(pg_engine) as s:
+        ev_id = s.execute(select(EventItem.event_id).where(EventItem.item_id == iid)).scalar_one()
+        ev = s.get(Event, ev_id)
+        assert ev.topic_path == ["війна", "атака рф", "удар бпла", "одеса"]
+        assert ev.topic_leaf_id is not None
+        leaf = s.get(TaxonomyNode, ev.topic_leaf_id)
+        assert leaf.slug == "одеса" and leaf.depth == 3

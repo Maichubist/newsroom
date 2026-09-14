@@ -35,6 +35,11 @@ DEFAULT_PROMPT = """Ти редактор українського новинн�
   однини (базова форма: "дрон", "Покровськ", "мобілізація", "Зеленський"). Без
   службових слів і загальників ("новина", "Україна", "сьогодні"). Синоніми зводь до
   одного слова ("шахед"/"безпілотник" → "дрон").
+- topic_path: масив із 2–5 рівнів теми від НАЙШИРШОГО до найвужчого — «піраміда» теми.
+  Кожен рівень — стисла тема українською в називному відмінку однини, у нижньому
+  регістрі. Приклади: ["війна", "атака рф", "удар бпла", "одеса"];
+  ["технології", "пристрої", "смартфон", "новинка"]; ["економіка", "бюджет", "пенсії"].
+  Перший рівень — широка сфера, далі дедалі конкретніше. Без службових слів.
 
 Матеріал:
 {news_text}"""
@@ -56,6 +61,9 @@ def parse_classification(raw: str | None) -> Classification | None:
     rubrics = [str(r).strip().lower() for r in (obj.get("rubrics") or []) if str(r).strip()]
     kw_raw = obj.get("keywords") or []
     keywords = [str(k).strip() for k in kw_raw if str(k).strip()][:10] if isinstance(kw_raw, list) else []
+    tp_raw = obj.get("topic_path") or []
+    topic_path = ([str(t).strip().lower() for t in tp_raw if str(t).strip()][:5]
+                  if isinstance(tp_raw, list) else [])
     return Classification(
         is_event=bool(obj.get("is_event")),
         rubrics=rubrics,
@@ -63,6 +71,7 @@ def parse_classification(raw: str | None) -> Classification | None:
         is_first_source=bool(obj.get("is_first_source")),
         is_rumor=bool(obj.get("is_rumor")),
         keywords=keywords,
+        topic_path=topic_path,
     )
 
 

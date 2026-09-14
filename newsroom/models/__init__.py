@@ -20,6 +20,7 @@ from newsroom.models.analytical import (
     EventItem,
     Story,
     StoryVersion,
+    TaxonomyNode,
 )
 from newsroom.models.publication import (
     ChannelMetric,
@@ -34,7 +35,7 @@ __all__ = [
     # raw
     "Source", "Item", "ItemVersion", "MediaAsset", "ItemEmbedding", "Entity", "ItemEntity",
     # analytical
-    "Event", "EventItem", "Story", "StoryVersion", "Claim", "ClaimEvidence",
+    "Event", "EventItem", "Story", "StoryVersion", "Claim", "ClaimEvidence", "TaxonomyNode",
     # publication
     "Publication", "PublicationMetric", "ChannelMetric", "ItemMetric", "SourceMetric",
     # service

@@ -48,6 +48,9 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS is_rumor boolean",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS classifier_model varchar(64)",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS keywords jsonb",
+    # learned taxonomy pyramid (charter v0.3 §3.1)
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS topic_path jsonb",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS topic_leaf_id bigint",
     # local media file deleted after publication (phash reuse-archive stays in DB)
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS purged_at timestamptz",
     # Telegram message id for re-fetching url-less media via Telethon
