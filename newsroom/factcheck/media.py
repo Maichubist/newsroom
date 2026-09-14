@@ -155,7 +155,7 @@ def check_media_pending(session_factory, checker: "MediaChecker", *, limit: int 
     """One media-check tick: check publishable events that own hashed media and
     have not been checked. Text-only events are ignored (nothing to hash), so
     this stays dormant until media is downloaded (stage 1г)."""
-    from sqlalchemy import Integer, cast, select
+    from sqlalchemy import Integer, cast, or_, select
 
     from newsroom.models import Decision, Event, EventItem, Item, MediaAsset
 
@@ -172,7 +172,9 @@ def check_media_pending(session_factory, checker: "MediaChecker", *, limit: int 
             .join(MediaAsset, MediaAsset.item_id == Item.id)
             .where(
                 Event.status.in_(("reported", "confirmed", "rumor")),
-                MediaAsset.phash.is_not(None),
+                # image with a phash (reuse-checkable) OR a video: video has no phash but
+                # must still get a media_clean verdict so a video-only post can attach it
+                or_(MediaAsset.phash.is_not(None), MediaAsset.kind == "video"),
                 Event.id.not_in(checked),
             )
             .order_by(Event.id).distinct().limit(limit)

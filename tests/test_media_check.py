@@ -131,3 +131,36 @@ def test_media_checker_clean_when_no_reuse(pg_engine):
     with Session(pg_engine) as s:
         dec = s.execute(select(Decision).where(Decision.entity_id == str(event_id))).scalars().one()
         assert dec.decision == "media_clean"
+
+
+@pytest.mark.pg
+def test_media_check_admits_video_only_event(pg_engine):
+    # a video has no phash; a video-only event must still be picked up and get a media_clean
+    # verdict, otherwise the publisher would never attach the Telegram video.
+    from newsroom.factcheck.media import check_media_pending
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Source
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime(2026, 9, 1, tzinfo=UTC)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@vidchan", name="V", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="v1", content_hash="v1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="video", phash=None,
+                         storage_key="ab/vid", first_seen_at=now))   # downloaded video, no phash
+        ev = Event(status="confirmed", title="Відео-подія", first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id))
+        s.commit()
+        event_id = ev.id
+
+    stats = check_media_pending(sf, MediaChecker(sf))
+    assert stats["events"] == 1                          # video-only event was selected
+    with Session(pg_engine) as s:
+        dec = s.execute(select(Decision).where(Decision.entity_id == str(event_id))).scalars().one()
+        assert dec.decision == "media_clean" and dec.details["checked"] == 0   # no phash to check
