@@ -96,24 +96,8 @@ class Publisher:
                 .where(EventItem.event_id == pub.event_id, Source.is_official.is_(True))
             ))
 
-        risk_level = event.risk_level if event else None
-        rubric = event.rubric if event else None
         now = _utc_now()
-
         from newsroom.models import Event as _Event
-        urgent_last_hour = int(s.scalar(
-            select(func.count()).select_from(Publication).join(_Event, _Event.id == Publication.event_id)
-            .where(Publication.status == "published", Publication.published_at >= now - dt.timedelta(hours=1),
-                   _Event.risk_level == "critical")
-        ) or 0)
-        surge_same_rubric = 0
-        if rubric:
-            surge_same_rubric = int(s.scalar(
-                select(func.count()).select_from(Publication).join(_Event, _Event.id == Publication.event_id)
-                .where(Publication.status == "published",
-                       Publication.published_at >= now - dt.timedelta(minutes=self.limits.surge_window_minutes),
-                       _Event.rubric == rubric)
-            ) or 0)
 
         # posts already out for THIS event's story in the cooldown window (one/story)
         story_recent_posts = 0
@@ -131,9 +115,6 @@ class Publisher:
             stopped=is_publishing_stopped(s),
             critic_ok=bool(features.get("critic_ok", False)),
             stoplist_blocked=is_blocked(violations) or (needs_official and not has_official),
-            risk_level=risk_level,
-            urgent_last_hour=urgent_last_hour,
-            surge_same_rubric=surge_same_rubric,
             story_recent_posts=story_recent_posts,
             is_refutation=is_refutation,
         )
@@ -194,7 +175,10 @@ class Publisher:
                 s.commit()
                 feats = pub.features or {}
                 pub_is_rumor = bool(feats.get("is_rumor") or (feats.get("render") or {}).get("is_rumor"))
-                self._notify_supervisor(publication_id, headline, risk_level=inputs.risk_level,
+                from newsroom.models import Event as _Ev
+                ev = s.get(_Ev, pub.event_id) if pub.event_id else None
+                self._notify_supervisor(publication_id, headline,
+                                        risk_level=(ev.risk_level if ev else None),
                                         is_rumor=pub_is_rumor, message_id=result.message_id)
                 self._purge_media(pub.event_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)

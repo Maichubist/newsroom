@@ -18,8 +18,7 @@ CONFIG = Path(__file__).resolve().parents[1] / "config"
 STOP = load_stoplist(CONFIG / "stoplist.yaml")
 # debounce off by default so the existing publish_pending tests (events at first_seen=now)
 # are unaffected; a dedicated test exercises the debounce with its own Limits.
-LIMITS = Limits(urgent_per_hour=6, surge_window_minutes=30,
-                surge_max_same_rubric=5, publish_debounce_minutes=0)
+LIMITS = Limits(story_cooldown_minutes=60, publish_debounce_minutes=0)
 
 
 class RecordingPoster:
@@ -681,8 +680,7 @@ def test_publish_debounce_holds_young_events(pg_engine):
             s.commit()
 
     tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
-    limits = Limits(urgent_per_hour=6, surge_window_minutes=30,
-                    surge_max_same_rubric=5, publish_debounce_minutes=6)
+    limits = Limits(story_cooldown_minutes=60, publish_debounce_minutes=6)
     pub = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=limits)
 
     _draft_aged("Свіжа", age_min=1)                           # younger than debounce -> held

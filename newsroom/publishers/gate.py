@@ -31,9 +31,6 @@ class LimitsConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Limits:
-    urgent_per_hour: int = 6
-    surge_window_minutes: int = 30
-    surge_max_same_rubric: int = 5
     # at most one post per story within this window — a fast-breaking story with many
     # sources/updates otherwise spams near-duplicate posts (refutations are exempt).
     story_cooldown_minutes: int = 60
@@ -50,9 +47,6 @@ def load_limits(path: str | Path) -> Limits:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     try:
         return Limits(
-            urgent_per_hour=int(data.get("urgent_per_hour", 6)),
-            surge_window_minutes=int(data.get("surge_window_minutes", 30)),
-            surge_max_same_rubric=int(data.get("surge_max_same_rubric", 5)),
             story_cooldown_minutes=int(data.get("story_cooldown_minutes", 60)),
             publish_debounce_minutes=int(data.get("publish_debounce_minutes", 6)),
         )
@@ -65,9 +59,6 @@ class GateInputs:
     stopped: bool = False
     critic_ok: bool = True
     stoplist_blocked: bool = False
-    risk_level: str | None = None          # critical | high | low
-    urgent_last_hour: int = 0
-    surge_same_rubric: int = 0
     story_recent_posts: int = 0             # posts already out for this event's story in the cooldown window
     is_refutation: bool = False             # a correction always goes out (exempt from the cooldown)
 
@@ -82,13 +73,14 @@ def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
     """Pure decision (charter v0.3). Returns allow=False with every reason it failed, or
     allow=True with no reasons.
 
-    What to publish is decided by popularity (charter §3), so the verification gates —
-    the official-source requirement for critical topics and the rumor rules — are gone.
-    What remains: the floor (manual halt, the critic which enforces OPSEC/ethics/AI-slop,
-    and the OPSEC stop-list), an anti-flood/anti-manipulation backstop (urgent rate,
-    same-topic surge), and the dedup cooldown (one post per story; refutations exempt)."""
+    What to publish — and how much — is decided by popularity/editorial curation (charter
+    §3), NOT by rate quotas: the old urgent-per-hour and same-rubric surge caps were
+    removed because on a war-dominant channel they throttled legitimate coverage and read
+    as "the bot stopped posting". What remains: the floor (manual halt, the critic which
+    enforces OPSEC/ethics/AI-slop, and the OPSEC stop-list) and the dedup cooldown (one
+    post per story; refutations exempt). Volume is bounded upstream by how selectively the
+    ranker marks events publish, plus the debounce and dedup."""
     reasons: list[str] = []
-    critical = inputs.risk_level == "critical"
 
     # --- floor (block unconditionally) ---
     if inputs.stopped:
@@ -97,12 +89,6 @@ def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
         reasons.append("critic_failed")
     if inputs.stoplist_blocked:
         reasons.append("stoplist")        # OPSEC/legal stop-list (charter §4)
-
-    # --- anti-flood / anti-manipulation backstop (hold) ---
-    if critical and inputs.urgent_last_hour >= limits.urgent_per_hour:
-        reasons.append("urgent_rate_limit")
-    if inputs.surge_same_rubric >= limits.surge_max_same_rubric:
-        reasons.append("surge")
 
     # --- one post per story per cooldown (hold) — a breaking story otherwise spams
     #     near-duplicate posts; refutations/corrections are exempt ---
