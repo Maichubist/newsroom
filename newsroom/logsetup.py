@@ -51,8 +51,25 @@ class JsonFormatter(logging.Formatter):
 
 def setup_logging(level: str | None = None) -> None:
     lvl = (level or os.getenv("NEWSROOM_LOG_LEVEL") or "INFO").upper()
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter())
+    fmt = JsonFormatter()
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    # Also write to a rotating file by default, so a crash traceback survives after the
+    # terminal is closed (set NEWSROOM_LOG_FILE="" to disable). Never let this break startup.
+    log_file = os.getenv("NEWSROOM_LOG_FILE", "logs/newsroom.log")
+    if log_file:
+        try:
+            from logging.handlers import RotatingFileHandler
+            from pathlib import Path
+
+            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(RotatingFileHandler(
+                log_file, maxBytes=10_000_000, backupCount=3, encoding="utf-8"))
+        except OSError:
+            pass
+
+    for h in handlers:
+        h.setFormatter(fmt)
     root = logging.getLogger()
-    root.handlers[:] = [handler]
+    root.handlers[:] = handlers
     root.setLevel(lvl)

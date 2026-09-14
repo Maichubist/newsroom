@@ -990,7 +990,21 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("taxonomy synonym merge disabled (TAXONOMY_MERGE_ENABLED off)")
 
-    await asyncio.gather(*tasks)
+    # A crashing task must NOT take the whole bot down with it: log its traceback and let
+    # the other loops keep running (return_exceptions), so e.g. a Telethon collector failure
+    # never stops publishing. (Each forever-loop already guards per-tick errors; this catches
+    # a fatal one that ends the task.)
+    def _on_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            name = getattr(task.get_coro(), "__qualname__", "task")
+            log.error("background task crashed", extra=bind(task=name, error=repr(exc)), exc_info=exc)
+
+    for t in tasks:
+        t.add_done_callback(_on_task_done)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":  # pragma: no cover
