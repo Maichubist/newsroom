@@ -131,6 +131,43 @@ def test_curate_pending_passes_learned_demand_to_ranker(pg_engine):
 
 
 @pytest.mark.pg
+def test_attack_reserved_to_digest_beats_must_publish(pg_engine):
+    # reserve_attacks runs before curate in the tick -> a critical+official attack is
+    # reserved to the digest, NOT must-published individually.
+    from pathlib import Path
+
+    from newsroom.db import make_session_factory
+    from newsroom.editorial import load_digest_config, reserve_attacks
+    from newsroom.models import Event, EventItem, Item, Source
+
+    cfg = load_digest_config(Path(__file__).resolve().parents[1] / "config" / "digest.yaml")
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        official = Source(kind="telegram", handle_or_url="@ps", name="ПС", origin="ua",
+                          tier="official", is_official=True)
+        s.add(official)
+        s.flush()
+        ev = Event(status="confirmed", risk_level="critical", rubric="war",
+                   title="Атака дронів на Київщині: пошкоджено склади", significance=0.9, first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        it = Item(source_id=official.id, external_id="atk1", content_hash="atk1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="official"))
+        eid = ev.id
+        s.commit()
+
+    reserve_attacks(sf, cfg)                       # tick step 1
+    ranker = FakeRanker({})
+    curate_pending(sf, ranker, significance_threshold=0.55)   # tick step 2
+    with Session(pg_engine) as s:
+        assert s.get(Event, eid).curated == "digest"   # reserved, not must-published
+    assert eid not in ranker.seen
+
+
+@pytest.mark.pg
 def test_curate_pending_attaches_topic_heat_to_ranker(pg_engine):
     from newsroom.analyze.topics import store_hot_topics
     from newsroom.db import make_session_factory

@@ -391,7 +391,7 @@ def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
     return LLMEditorialRanker()
 
 
-async def curation_forever(session_factory, ranker, *, grouper=None,
+async def curation_forever(session_factory, ranker, *, grouper=None, digest_config=None,
                            significance_threshold: float | None = None,
                            window_hours: int = 6, tick_seconds: float = 120.0,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
@@ -399,15 +399,19 @@ async def curation_forever(session_factory, ranker, *, grouper=None,
     the rest by comparative LLM ranking), before editorial. Only publish-marked
     events are drafted — the count follows the news, not a fixed rate.
 
-    When a dedup `grouper` is given, dedup runs FIRST in the same tick: curation
-    excludes events marked duplicate_of, so deduping immediately before curating
-    guarantees a cross-source duplicate is caught before it can be curated →
-    drafted → published (the standalone dedup loop's slow cadence let duplicates
-    slip through the 30s editorial loop first)."""
-    from newsroom.editorial import curate_pending, dedup_pending
+    Per tick, in order: reserve attacks for the digest, dedup, then curate. Both
+    reserve and dedup set curated/duplicate_of, and curation excludes those — so an
+    attack (→ digest) or a cross-source duplicate is caught BEFORE curation can
+    must-publish it individually. Their own slow loops let attacks/dupes slip through
+    the 30s editorial loop first; running them here closes that race."""
+    from newsroom.editorial import curate_pending, dedup_pending, reserve_attacks
 
     while not (stop and stop.is_set()):
         try:
+            if digest_config is not None:
+                rstats = await asyncio.to_thread(reserve_attacks, session_factory, digest_config)
+                if rstats.get("reserved"):
+                    log.info("digest reserve tick", extra=bind(**rstats))
             if grouper is not None:
                 dstats = await asyncio.to_thread(dedup_pending, session_factory, grouper)
                 if dstats.get("duplicates"):
@@ -870,12 +874,20 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("LLM batch dedup disabled (DEDUP_ENABLED off)")
 
+    # Reserve attacks for the digest inside the curation tick (before must-publish can
+    # grab them individually), so shelling/drone events consolidate into one digest.
+    curation_digest_config = None
+    if curation_enabled() and digest_enabled():
+        from newsroom.editorial import load_digest_config
+
+        curation_digest_config = load_digest_config(CONFIG_DIR / "digest.yaml")
+
     if curation_enabled():
         ranker = build_editorial_ranker_from_env()
         tasks.append(asyncio.create_task(curation_forever(
-            session_factory, ranker, grouper=grouper,
+            session_factory, ranker, grouper=grouper, digest_config=curation_digest_config,
             significance_threshold=significance_threshold)))
-        log.info("editorial curation enabled")
+        log.info("editorial curation enabled", extra=bind(digest_reserve=curation_digest_config is not None))
     else:
         if grouper is not None:            # curation off: dedup still needs a loop
             tasks.append(asyncio.create_task(dedup_forever(session_factory, grouper)))
