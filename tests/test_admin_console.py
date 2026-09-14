@@ -189,14 +189,15 @@ def test_report_demand_empty_then_filled(pg_engine):
 
 @pytest.mark.pg
 def test_report_topics_empty_then_filled(pg_engine):
-    from newsroom.analyze.topics import store_hot_topics
+    from newsroom.analyze.taxonomy import ingest_path
     from newsroom.db import make_session_factory
+    from newsroom.models import TaxonomyNode
 
     sf = make_session_factory(pg_engine)
     assert "ще нема" in AdminConsole(sf).handle("/topics")
     with Session(pg_engine) as s:
-        store_hot_topics(s, {"topics": [{"topic": "дрон", "events": 3, "posts": 5, "heat": 0.9}],
-                             "heat": {"дрон": 0.9}, "at": "2026-09-13T00:00:00+00:00"})
+        leaf = ingest_path(s, ["війна", "атака рф", "удар дрон"])
+        s.get(TaxonomyNode, leaf).heat = 0.9      # a hot node (as refresh would set)
         s.commit()
     out = AdminConsole(sf).handle("/topics")
-    assert "дрон" in out
+    assert "Піраміда тем" in out and "війна" in out   # shows the hot path

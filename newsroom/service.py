@@ -680,21 +680,13 @@ async def demand_forever(session_factory, collector, *, tick_seconds: float = 18
 
 
 async def topics_forever(session_factory, *, tick_seconds: float = 1800.0,
-                         window_hours: int = 48, stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Recompute the data-driven hot-topics index (flat keywords) AND the taxonomy-pyramid
-    engagement heat from competitor engagement, so curation and the admin console can read
-    them. DB-only, no LLM (keywords/paths are extracted upstream in verify). Nothing is
-    published."""
+                         stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Recompute the taxonomy-pyramid engagement heat from competitor engagement, so
+    curation and the admin console read what topics are hot now (charter v0.3 §3.2). DB-only,
+    no LLM (topic paths are extracted upstream in verify). Nothing is published."""
     from newsroom.analyze.taxonomy import refresh_taxonomy_heat
-    from newsroom.analyze.topics import refresh_hot_topics
 
     while not (stop and stop.is_set()):
-        try:
-            result = await asyncio.to_thread(refresh_hot_topics, session_factory, window_hours=window_hours)
-            if result.get("topics"):
-                log.info("hot topics", extra=bind(topics=len(result["topics"])))
-        except Exception:
-            log.exception("topics tick failed")
         try:
             heat = await asyncio.to_thread(refresh_taxonomy_heat, session_factory)
             if heat.get("nodes"):

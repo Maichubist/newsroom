@@ -164,25 +164,28 @@ def test_attack_reserved_to_digest_beats_must_publish(pg_engine):
 
 
 @pytest.mark.pg
-def test_curate_pending_attaches_topic_heat_to_ranker(pg_engine):
-    from newsroom.analyze.topics import store_hot_topics
+def test_curate_pending_attaches_taxonomy_heat_to_ranker(pg_engine):
+    # the pyramid's node heat (max along the event's path) is the popularity signal now
+    from newsroom.analyze.taxonomy import ingest_path
     from newsroom.db import make_session_factory
-    from newsroom.models import Event
+    from newsroom.models import Event, TaxonomyNode
 
     sf = make_session_factory(pg_engine)
     now = dt.datetime.now(dt.timezone.utc)
     with Session(pg_engine) as s:
+        leaf = ingest_path(s, ["економіка", "ринок", "акції"])
+        node = s.get(TaxonomyNode, leaf)
+        node.heat = 0.9          # a hot leaf (as refresh_taxonomy_heat would set)
         ev = Event(status="confirmed", risk_level="low", rubric="economy", title="Подія",
-                   significance=0.8, keywords=["дрон", "покровськ"], first_seen_at=now)
+                   significance=0.8, topic_leaf_id=leaf, first_seen_at=now)
         s.add(ev)
         s.flush()
         eid = ev.id
-        store_hot_topics(s, {"heat": {"дрон": 0.9}, "topics": [], "at": now.isoformat()})
         s.commit()
 
     ranker = FakeRanker({eid: "publish"})
     curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
-    assert ranker.candidates and ranker.candidates[0].heat == pytest.approx(0.9)   # hottest keyword
+    assert ranker.candidates and ranker.candidates[0].heat == pytest.approx(0.9)   # max heat along path
 
 
 @pytest.mark.pg

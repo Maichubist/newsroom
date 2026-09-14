@@ -227,27 +227,27 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         conditions.append(Event.significance >= significance_threshold)
 
     from newsroom.analyze.demand import load_demand
-    from newsroom.analyze.topics import load_hot_topics, topic_heat
+    from newsroom.analyze.taxonomy import load_event_heat
     from newsroom.models import Publication
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
-                   Event.significance, Event.fact_base, Event.update_type, Event.keywords)
+                   Event.significance, Event.fact_base, Event.update_type)
             .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
             .order_by(Event.significance.desc().nullslast(), Event.id).limit(limit)
         ).all()
         if not rows:
             return {"curated": 0, "publish": 0, "hold": 0, "must": 0}
 
-        demand_by_rubric = load_demand(s)      # learned audience demand per rubric ({} until data)
-        hot = load_hot_topics(s)               # data-driven hot-topic heat ({} until data)
+        demand_by_rubric = load_demand(s)                        # learned audience demand per rubric ({} until data)
+        event_heat = load_event_heat(s, [r[0] for r in rows])   # taxonomy-pyramid heat per event (0 until data)
 
     decisions: dict[int, str] = {}
     must_ids: set[int] = set()
     to_rank: list[Candidate] = []
-    for eid, title, rubric, risk, sig, fact_base, update_type, keywords in rows:
+    for eid, title, rubric, risk, sig, fact_base, update_type in rows:
         # only a refutation skips the editor (a correction must go out); everything else,
         # breaking critical news included, is judged comparatively by the ranker
         if must_publish(update_type=update_type):
@@ -257,7 +257,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
                                      significance=sig, facts=_facts_brief(fact_base),
                                      demand=demand_by_rubric.get(rubric) if rubric else None,
-                                     heat=topic_heat(keywords, hot) or None))
+                                     heat=event_heat.get(eid) or None))
     must_count = len(decisions)
 
     if to_rank:

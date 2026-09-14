@@ -220,6 +220,40 @@ def node_path_labels(nodes_by_id: dict, node_id: int) -> list[str]:
     return list(reversed(chain))
 
 
+def load_event_heat(session, event_ids) -> dict[int, float]:
+    """Per-event topic heat for curation: the MAX heat along the event's path (a hot broad
+    topic or a hot specific leaf both count), from taxonomy_nodes. 0.0 when unplaced/cold.
+    This is the pyramid's popularity signal that replaces the flat keyword hot-topics."""
+    from sqlalchemy import select
+
+    from newsroom.models import Event, TaxonomyNode
+
+    event_ids = list(event_ids)
+    if not event_ids:
+        return {}
+    leaf_of = dict(session.execute(
+        select(Event.id, Event.topic_leaf_id).where(Event.id.in_(event_ids))
+    ).all())
+    nodes = {nid: (heat or 0.0, parent) for nid, heat, parent in session.execute(
+        select(TaxonomyNode.id, TaxonomyNode.heat, TaxonomyNode.parent_id)
+    ).all()}
+
+    out: dict[int, float] = {}
+    for eid in event_ids:
+        h = 0.0
+        nid = leaf_of.get(eid)
+        guard = 0
+        while nid is not None and guard < 32:
+            rec = nodes.get(nid)
+            if rec is None:
+                break
+            h = max(h, rec[0])
+            nid = rec[1]
+            guard += 1
+        out[eid] = round(h, 4)
+    return out
+
+
 def load_top_nodes(session, *, limit: int = 25, min_depth: int = 1) -> list[dict]:
     """Hottest taxonomy nodes with their full path, for the admin console (/topics)."""
     from sqlalchemy import select
