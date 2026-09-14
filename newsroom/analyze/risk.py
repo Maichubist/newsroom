@@ -93,45 +93,29 @@ def decide(
     has_first_source: bool = False,
     high_reputation: bool = False,
     is_rumor: bool = False,
-    require_official_for_critical: bool = True,
 ) -> GateDecision:
-    """Apply the matrix condition for `level` to the available evidence.
+    """Map the available evidence to a transparency STATUS label (charter v0.3 §5).
 
-    require_official_for_critical=False WAIVES the charter's official-source rule for
-    critical topics (test-channel only): officiality is dropped but corroboration is
-    kept — critical then behaves like high (first-source or 2+ independent sources).
-    Rumors in critical topics stay blocked regardless."""
+    This is no longer a verification GATE: the official-source requirement for critical
+    topics and the rumor rules were dropped — what to publish is decided by popularity
+    (charter §3), and the OPSEC/legal stop-list is a separate floor (§4). What remains
+    here is the confidence label the reader sees, plus a light corroboration floor: a
+    lone, uncorroborated low-reputation source is 'signal' (waits for a second source)
+    rather than posted as fact. `is_rumor` only sets the label now — it never blocks."""
     if level not in LEVELS:
         raise ValueError(f"unknown risk level {level!r}")
 
-    # Rumors (charter §3.7): allowed only below the critical level, always labelled.
     if is_rumor:
-        if level == "critical":
-            return GateDecision(level, STATUS_SIGNAL, False,
-                                "rumor not allowed for critical topics (charter 3.7.2)")
-        return GateDecision(level, STATUS_RUMOR, True, "published as rumor (charter 3.7)")
+        return GateDecision(level, STATUS_RUMOR, True, "labelled as rumor")
 
-    if level == "critical":
-        if has_official:
-            return GateDecision(level, STATUS_CONFIRMED, True, "official source present")
-        if not require_official_for_critical:
-            # test-channel: official requirement waived -> fall back to corroboration
-            if has_first_source:
-                return GateDecision(level, STATUS_CONFIRMED, True, "first-hand source (official waived)")
-            if independent_sources >= 2:
-                return GateDecision(level, STATUS_REPORTED, True, "2+ independent sources (official waived)")
-            return GateDecision(level, STATUS_SIGNAL, False,
-                                "critical topic needs 2+ independent sources (official waived)")
-        return GateDecision(level, STATUS_SIGNAL, False,
-                            "critical topic requires an official source (charter 3.1)")
-
-    if level == "high":
+    # critical and high read the same now (no official requirement): corroboration sets
+    # the label, and a single weak source stays 'signal' until a second one confirms.
+    if level in ("critical", "high"):
         if has_official or has_first_source:
             return GateDecision(level, STATUS_CONFIRMED, True, "first-hand or official source")
         if independent_sources >= 2:
-            return GateDecision(level, STATUS_REPORTED, True, "2+ independent sources, no first source")
-        return GateDecision(level, STATUS_SIGNAL, False,
-                            "high-risk needs 2+ independent sources or a first source")
+            return GateDecision(level, STATUS_REPORTED, True, "2+ independent sources")
+        return GateDecision(level, STATUS_SIGNAL, False, "needs a second or first-hand source")
 
     # low
     if has_official or has_first_source:

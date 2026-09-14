@@ -73,8 +73,7 @@ class Verifier:
         stoplist_rules: list[StopRule],
         threshold: float = DEFAULT_THRESHOLD,
         window_hours: int = DEFAULT_WINDOW_HOURS,
-        charter_version: str = "0.2",
-        require_official_for_critical: bool = True,
+        charter_version: str = "0.3",
     ):
         self.sf = session_factory
         self.classifier = classifier
@@ -84,8 +83,6 @@ class Verifier:
         self.stoplist_rules = stoplist_rules
         self.clusterer = EventClusterer(session_factory, threshold=threshold, window_hours=window_hours)
         self.charter_version = charter_version
-        # test-channel: waive the critical→official rule (charter floor otherwise)
-        self.require_official_for_critical = bool(require_official_for_critical)
 
     # ------------------------------------------------------------------
     def verify_item(self, item_id: int) -> VerifyResult:
@@ -248,7 +245,6 @@ class Verifier:
                 has_first_source=cls.is_first_source,
                 high_reputation=high_rep,
                 is_rumor=cls.is_rumor,
-                require_official_for_critical=self.require_official_for_critical,
             )
 
             event = s.get(Event, event_id)

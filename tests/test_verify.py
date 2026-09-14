@@ -195,4 +195,4 @@ def test_decisions_are_journalled(pg_engine):
     v.verify_item(iid)
     with Session(pg_engine) as s:
         rows = s.execute(select(Decision).where(Decision.entity_type == "item", Decision.entity_id == str(iid))).scalars().all()
-        assert any(d.stage == "verify" and d.charter_version == "0.2" for d in rows)
+        assert any(d.stage == "verify" and d.charter_version == "0.3" for d in rows)

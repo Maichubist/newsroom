@@ -32,13 +32,6 @@ def verify_enabled() -> bool:
     return os.getenv("VERIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
-def critical_requires_official() -> bool:
-    """Charter floor: critical topics (war/defense) need an official source. Set
-    CRITICAL_REQUIRES_OFFICIAL=false to waive it on the test channel (still needs 2+
-    independent sources). Default true."""
-    return os.getenv("CRITICAL_REQUIRES_OFFICIAL", "true").strip().lower() in {"1", "true", "yes"}
-
-
 def factbase_enabled() -> bool:
     return os.getenv("FACTBASE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -176,7 +169,6 @@ def build_verifier_from_env(session_factory):  # pragma: no cover — needs Open
         risk_matrix=load_risk_matrix(CONFIG_DIR / "risk.yaml"),
         filters=load_filters(CONFIG_DIR / "filters.yaml"),
         stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
-        require_official_for_critical=critical_requires_official(),
     )
 
 
@@ -492,7 +484,6 @@ def build_publisher_from_env(session_factory):
         media_store=media_store,
         purge_media_after_publish=purge,
         require_vision=media_moderation_enabled(),
-        require_official_for_critical=critical_requires_official(),
     )
 
 

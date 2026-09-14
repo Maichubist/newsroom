@@ -18,7 +18,7 @@ CONFIG = Path(__file__).resolve().parents[1] / "config"
 STOP = load_stoplist(CONFIG / "stoplist.yaml")
 # debounce off by default so the existing publish_pending tests (events at first_seen=now)
 # are unaffected; a dedicated test exercises the debounce with its own Limits.
-LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30,
+LIMITS = Limits(urgent_per_hour=6, surge_window_minutes=30,
                 surge_max_same_rubric=5, publish_debounce_minutes=0)
 
 
@@ -570,8 +570,8 @@ def test_media_attaches_on_reuse_alone_when_vision_disabled(pg_engine):
 
 
 def test_publish_skips_blocked_top_draft(pg_engine):
-    # a perpetually-blocked top draft (critical, no official source) must not stall the
-    # queue — a publishable lower-significance post still goes out.
+    # a perpetually-blocked top draft (its body trips the OPSEC stop-list) must not stall
+    # the queue — a publishable lower-significance post still goes out.
     from newsroom.db import make_session_factory
     from newsroom.models import Event, Publication
 
@@ -579,13 +579,13 @@ def test_publish_skips_blocked_top_draft(pg_engine):
     poster = RecordingPoster()
     with Session(pg_engine) as s:
         top = Event(status="confirmed", risk_level="critical", rubric="war", title="top",
-                    significance=0.9, first_seen_at=dt.datetime.now(UTC))     # blocks: critical_no_official
+                    significance=0.9, first_seen_at=dt.datetime.now(UTC))     # blocks: stoplist (OPSEC)
         low = Event(status="confirmed", risk_level="low", rubric="economy", title="low",
                     significance=0.4, first_seen_at=dt.datetime.now(UTC))     # publishable
         s.add_all([top, low])
         s.flush()
         p_top = Publication(event_id=top.id, channel="telegram", kind="post", status="draft",
-                            headline="Top", body="Критична новина без офіційного джерела.",
+                            headline="Top", body="Позиції ППО поблизу Києва — детально.",
                             features={"critic_ok": True, "is_rumor": False})
         p_low = Publication(event_id=low.id, channel="telegram", kind="post", status="draft",
                             headline="Low", body="Спокійна новина з деталями.",
@@ -681,7 +681,7 @@ def test_publish_debounce_holds_young_events(pg_engine):
             s.commit()
 
     tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
-    limits = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30,
+    limits = Limits(urgent_per_hour=6, surge_window_minutes=30,
                     surge_max_same_rubric=5, publish_debounce_minutes=6)
     pub = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=limits)
 

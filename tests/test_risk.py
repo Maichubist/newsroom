@@ -51,11 +51,17 @@ def test_invalid_config_rejected(tmp_path):
 
 # --- gate decision -------------------------------------------------------------
 
-def test_critical_requires_official():
-    assert decide("critical", independent_sources=5).publishable is False
-    assert decide("critical", independent_sources=5).status == STATUS_SIGNAL
-    ok = decide("critical", has_official=True)
-    assert ok.publishable and ok.status == STATUS_CONFIRMED
+def test_critical_reads_like_high_no_official_requirement():
+    # charter v0.3: no official-source gate. Critical corroborates like high — the label
+    # follows the evidence, and a single weak source is 'signal' (waits for a second).
+    assert decide("critical", independent_sources=1).publishable is False
+    assert decide("critical", independent_sources=1).status == STATUS_SIGNAL
+    two = decide("critical", independent_sources=2)
+    assert two.publishable and two.status == STATUS_REPORTED
+    off = decide("critical", has_official=True)
+    assert off.publishable and off.status == STATUS_CONFIRMED
+    first = decide("critical", has_first_source=True)
+    assert first.publishable and first.status == STATUS_CONFIRMED
 
 
 def test_high_needs_two_independent_or_first_source():
@@ -72,24 +78,12 @@ def test_low_needs_high_reputation():
     assert rep.publishable and rep.status == STATUS_REPORTED
 
 
-def test_rumor_blocked_at_critical_allowed_below():
-    blocked = decide("critical", is_rumor=True)
-    assert blocked.publishable is False and blocked.status == STATUS_SIGNAL
-    allowed = decide("high", is_rumor=True)
-    assert allowed.publishable and allowed.status == STATUS_RUMOR
-
-
-def test_critical_official_waived_falls_back_to_corroboration():
-    # test-channel waiver: officiality dropped, corroboration kept
-    one = decide("critical", independent_sources=1, require_official_for_critical=False)
-    assert one.publishable is False and one.status == STATUS_SIGNAL       # single source still not enough
-    two = decide("critical", independent_sources=2, require_official_for_critical=False)
-    assert two.publishable and two.status == STATUS_REPORTED               # 2+ independent now publishes
-    first = decide("critical", has_first_source=True, require_official_for_critical=False)
-    assert first.publishable and first.status == STATUS_CONFIRMED
-    # rumors in critical stay blocked even with the waiver
-    rumor = decide("critical", is_rumor=True, require_official_for_critical=False)
-    assert rumor.publishable is False
+def test_rumor_is_a_label_not_a_block():
+    # charter v0.3: rumor no longer blocks anywhere (incl. critical); it only sets the label
+    at_critical = decide("critical", is_rumor=True)
+    assert at_critical.publishable and at_critical.status == STATUS_RUMOR
+    below = decide("high", is_rumor=True)
+    assert below.publishable and below.status == STATUS_RUMOR
 
 
 def test_unknown_level_raises():

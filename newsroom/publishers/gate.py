@@ -32,7 +32,6 @@ class LimitsConfigError(ValueError):
 @dataclass(frozen=True)
 class Limits:
     urgent_per_hour: int = 6
-    rumors_per_day: int = 8
     surge_window_minutes: int = 30
     surge_max_same_rubric: int = 5
     # at most one post per story within this window — a fast-breaking story with many
@@ -52,7 +51,6 @@ def load_limits(path: str | Path) -> Limits:
     try:
         return Limits(
             urgent_per_hour=int(data.get("urgent_per_hour", 6)),
-            rumors_per_day=int(data.get("rumors_per_day", 8)),
             surge_window_minutes=int(data.get("surge_window_minutes", 30)),
             surge_max_same_rubric=int(data.get("surge_max_same_rubric", 5)),
             story_cooldown_minutes=int(data.get("story_cooldown_minutes", 60)),
@@ -67,12 +65,8 @@ class GateInputs:
     stopped: bool = False
     critic_ok: bool = True
     stoplist_blocked: bool = False
-    has_official_source: bool = False
-    is_rumor: bool = False
-    rumor_labeled: bool = False
     risk_level: str | None = None          # critical | high | low
     urgent_last_hour: int = 0
-    rumors_last_day: int = 0
     surge_same_rubric: int = 0
     story_recent_posts: int = 0             # posts already out for this event's story in the cooldown window
     is_refutation: bool = False             # a correction always goes out (exempt from the cooldown)
@@ -84,36 +78,29 @@ class GateDecision:
     reasons: list[str] = field(default_factory=list)
 
 
-def evaluate_gate(inputs: GateInputs, limits: Limits, *,
-                  require_official_for_critical: bool = True) -> GateDecision:
-    """Pure decision. Returns allow=False with every reason it failed, or
-    allow=True with no reasons. require_official_for_critical=False waives the
-    critical→official rule (test-channel only); every other rule still applies."""
+def evaluate_gate(inputs: GateInputs, limits: Limits) -> GateDecision:
+    """Pure decision (charter v0.3). Returns allow=False with every reason it failed, or
+    allow=True with no reasons.
+
+    What to publish is decided by popularity (charter §3), so the verification gates —
+    the official-source requirement for critical topics and the rumor rules — are gone.
+    What remains: the floor (manual halt, the critic which enforces OPSEC/ethics/AI-slop,
+    and the OPSEC stop-list), an anti-flood/anti-manipulation backstop (urgent rate,
+    same-topic surge), and the dedup cooldown (one post per story; refutations exempt)."""
     reasons: list[str] = []
     critical = inputs.risk_level == "critical"
 
-    # --- full halt / charter hard rules (block unconditionally) ---
+    # --- floor (block unconditionally) ---
     if inputs.stopped:
         reasons.append("stop_button")
     if not inputs.critic_ok:
         reasons.append("critic_failed")
     if inputs.stoplist_blocked:
-        reasons.append("stoplist")
-    if critical and not inputs.has_official_source and require_official_for_critical:
-        reasons.append("critical_no_official")     # war/defense: official source required
-    if inputs.is_rumor:
-        if critical:
-            reasons.append("rumor_in_critical_topic")   # rumors never run in critical topics
-        elif not inputs.rumor_labeled:
-            reasons.append("rumor_unlabeled")           # charter 3.7: label required
+        reasons.append("stoplist")        # OPSEC/legal stop-list (charter §4)
 
-    # --- rate limits (hold) ---
+    # --- anti-flood / anti-manipulation backstop (hold) ---
     if critical and inputs.urgent_last_hour >= limits.urgent_per_hour:
         reasons.append("urgent_rate_limit")
-    if inputs.is_rumor and inputs.rumors_last_day >= limits.rumors_per_day:
-        reasons.append("rumor_rate_limit")
-
-    # --- surge / possible attack (hold) ---
     if inputs.surge_same_rubric >= limits.surge_max_same_rubric:
         reasons.append("surge")
 
