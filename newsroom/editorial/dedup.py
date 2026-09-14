@@ -142,9 +142,12 @@ def dedup_pending(session_factory, grouper: "DedupGrouper", *, window_hours: int
 
     groups = grouper.group(events)
     dups = 0
+    merged = 0
     with session_factory() as s:
         for group in groups:
             canonical = min(group)          # earliest event is the canonical
+            canon = s.get(Event, canonical)
+            canon_story = canon.story_id if canon else None
             for eid in group:
                 if eid == canonical:
                     continue
@@ -152,10 +155,17 @@ def dedup_pending(session_factory, grouper: "DedupGrouper", *, window_hours: int
                 if ev is None or ev.duplicate_of is not None:
                     continue
                 ev.duplicate_of = canonical
+                # merge fragmented stories: the same real event split into different
+                # story_ids (embeddings diverge on multi-facet news), which defeats the
+                # per-story cooldown. Pulling the duplicate into the canonical's story
+                # collapses the fragments so one-post-per-story works across sources.
+                if canon_story is not None and ev.story_id != canon_story:
+                    ev.story_id = canon_story
+                    merged += 1
                 s.add(Decision(entity_type="event", entity_id=str(eid), stage="edit",
                                decision="duplicate", reason=f"duplicate_of={canonical}",
-                               details={"duplicate_of": canonical},
+                               details={"duplicate_of": canonical, "story_merged_into": canon_story},
                                model=getattr(grouper, "model", None)))
                 dups += 1
         s.commit()
-    return {"events": len(events), "groups": len(groups), "duplicates": dups}
+    return {"events": len(events), "groups": len(groups), "duplicates": dups, "stories_merged": merged}

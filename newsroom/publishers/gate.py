@@ -38,6 +38,10 @@ class Limits:
     # at most one post per story within this window — a fast-breaking story with many
     # sources/updates otherwise spams near-duplicate posts (refutations are exempt).
     story_cooldown_minutes: int = 60
+    # hold a new event this many minutes before it may publish, so cross-source twins
+    # arrive and get merged (dedup + story-merge) before the first one goes out. This is
+    # enforced in the publish query, not evaluate_gate (refutations are exempt).
+    publish_debounce_minutes: int = 6
 
 
 def load_limits(path: str | Path) -> Limits:
@@ -52,6 +56,7 @@ def load_limits(path: str | Path) -> Limits:
             surge_window_minutes=int(data.get("surge_window_minutes", 30)),
             surge_max_same_rubric=int(data.get("surge_max_same_rubric", 5)),
             story_cooldown_minutes=int(data.get("story_cooldown_minutes", 60)),
+            publish_debounce_minutes=int(data.get("publish_debounce_minutes", 6)),
         )
     except (TypeError, ValueError) as exc:
         raise LimitsConfigError(f"bad limits value: {exc}") from exc

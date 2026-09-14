@@ -363,13 +363,15 @@ class Publisher:
         (e.g. a rate-limited critical post) does not head-of-line-block the queue —
         a publishable lower post still goes out. If the master switch is off, do
         nothing (and touch no network)."""
-        from sqlalchemy import func, select
+        from sqlalchemy import func, or_, select
 
         from newsroom.models import Event, Publication
 
         if not self.telegram.is_enabled():
             return {"published": 0, "blocked": 0, "disabled": 1}
 
+        now = _utc_now()
+        debounce_cut = now - dt.timedelta(minutes=self.limits.publish_debounce_minutes)
         with self.sf() as s:
             # most-significant first; scan a window wider than `limit` so blocked
             # posts are stepped over, not stuck on (unscored significance sorts last)
@@ -386,6 +388,10 @@ class Publisher:
                     Event.duplicate_of.is_(None),
                     Event.curated.is_distinct_from("digest"),
                     Event.curated.is_distinct_from("digested"),
+                    # debounce: hold a young event so cross-source twins arrive and get
+                    # merged before the first publishes; a refutation goes out immediately
+                    or_(Event.first_seen_at < debounce_cut,
+                        func.lower(func.coalesce(Event.update_type, "")) == "refutation"),
                 )
                 .order_by(func.coalesce(Event.significance, 0.0).desc(), Publication.id)
                 .limit(max(limit, scan))

@@ -72,6 +72,39 @@ def test_dedup_marks_non_canonical_duplicates(pg_engine):
 
 
 @pytest.mark.pg
+def test_dedup_merges_fragmented_stories(pg_engine):
+    # the real-world failure: the same event split into different story_ids (embeddings
+    # diverge on multi-facet news), which defeats the per-story cooldown. Dedup should pull
+    # the duplicate into the canonical's story so the fragments collapse.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Story
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        s1 = Story(slug="frag-a", title="A", state="developing", last_event_at=now)
+        s2 = Story(slug="frag-b", title="B", state="developing", last_event_at=now)
+        s.add_all([s1, s2])
+        s.flush()
+        a = Event(status="confirmed", rubric="politics", title="Санкції — джерело A",
+                  story_id=s1.id, first_seen_at=now)
+        b = Event(status="confirmed", rubric="politics", title="Санкції — джерело B",
+                  story_id=s2.id, first_seen_at=now)
+        s.add_all([a, b])
+        s.flush()
+        a_id, b_id, s1_id, s2_id = a.id, b.id, s1.id, s2.id
+        s.commit()
+
+    grouper = FakeGrouper([[a_id, b_id]])
+    stats = dedup_pending(sf, grouper, window_hours=48)
+    assert stats["duplicates"] == 1 and stats["stories_merged"] == 1
+    with Session(pg_engine) as s:
+        assert s.get(Event, b_id).duplicate_of == a_id
+        assert s.get(Event, b_id).story_id == s1_id      # pulled into the canonical's story
+        assert s.get(Event, a_id).story_id == s1_id      # canonical unchanged
+
+
+@pytest.mark.pg
 def test_dedup_no_call_when_fewer_than_two(pg_engine):
     from newsroom.db import make_session_factory
 

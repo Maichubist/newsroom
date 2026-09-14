@@ -16,7 +16,10 @@ pytestmark = pytest.mark.pg
 UTC = dt.timezone.utc
 CONFIG = Path(__file__).resolve().parents[1] / "config"
 STOP = load_stoplist(CONFIG / "stoplist.yaml")
-LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30, surge_max_same_rubric=5)
+# debounce off by default so the existing publish_pending tests (events at first_seen=now)
+# are unaffected; a dedicated test exercises the debounce with its own Limits.
+LIMITS = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30,
+                surge_max_same_rubric=5, publish_debounce_minutes=0)
 
 
 class RecordingPoster:
@@ -652,6 +655,42 @@ def test_publish_story_cooldown_holds_second_same_story_post(pg_engine):
     assert pub.publish_pending(limit=1)["published"] == 1      # first story post goes
     stats2 = pub.publish_pending(limit=1)
     assert stats2["published"] == 0 and stats2["blocked"] == 1  # second held by story_cooldown
+
+
+def test_publish_debounce_holds_young_events(pg_engine):
+    # a fresh event is held for the debounce window (so cross-source twins can arrive and
+    # merge before the first publishes); an older one and a refutation are not held.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    now = dt.datetime.now(UTC)
+
+    def _draft_aged(title, *, age_min, update_type=None):
+        with Session(pg_engine) as s:
+            ev = Event(status="confirmed", risk_level="low", rubric="economy", title=title,
+                       update_type=update_type, significance=0.8,
+                       first_seen_at=now - dt.timedelta(minutes=age_min))
+            s.add(ev)
+            s.flush()
+            s.add(Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                              headline=title, body=f"{title}: новина з деталями.",
+                              features={"critic_ok": True, "is_rumor": False}))
+            s.flush()
+            s.commit()
+
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    limits = Limits(urgent_per_hour=6, rumors_per_day=8, surge_window_minutes=30,
+                    surge_max_same_rubric=5, publish_debounce_minutes=6)
+    pub = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=limits)
+
+    _draft_aged("Свіжа", age_min=1)                           # younger than debounce -> held
+    assert pub.publish_pending(limit=50)["published"] == 0
+
+    _draft_aged("Стара", age_min=30)                          # older than debounce -> goes
+    _draft_aged("Спростування", age_min=1, update_type="refutation")  # exempt -> goes
+    assert pub.publish_pending(limit=50)["published"] == 2
 
 
 def test_publish_prefers_significant_order(pg_engine):
