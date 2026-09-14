@@ -104,6 +104,10 @@ def topics_enabled() -> bool:
     return os.getenv("TOPICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def taxonomy_merge_enabled() -> bool:
+    return os.getenv("TAXONOMY_MERGE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def metrics_enabled() -> bool:
     return os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -696,6 +700,30 @@ async def topics_forever(session_factory, *, tick_seconds: float = 1800.0,
         await asyncio.sleep(tick_seconds)
 
 
+def build_synonym_grouper_from_env():  # pragma: no cover — needs OpenAI
+    """Assemble the LLM synonym grouper for taxonomy-node merging."""
+    from newsroom.analyze.taxonomy import LLMSynonymGrouper
+
+    return LLMSynonymGrouper()
+
+
+async def taxonomy_merge_forever(session_factory, grouper, *, tick_seconds: float = 3600.0,
+                                 stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Fold synonym sibling nodes together so the learned tree does not fragment into
+    near-duplicate topics ("удар бпла" / "атака дронів"). LLM-driven, so a slow cadence.
+    Nothing is published."""
+    from newsroom.analyze.taxonomy import merge_synonym_nodes
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(merge_synonym_nodes, session_factory, grouper)
+            if stats.get("merged"):
+                log.info("taxonomy merge", extra=bind(**stats))
+        except Exception:
+            log.exception("taxonomy merge tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def metrics_forever(session_factory, collector, channel_chat_id, *,
                           tick_seconds: float = 600.0, channel_every: int = 6,
                           stop: asyncio.Event | None = None) -> None:  # pragma: no cover
@@ -954,6 +982,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("hot topics enabled")
     else:
         log.info("hot topics disabled (TOPICS_ENABLED off)")
+
+    if taxonomy_merge_enabled():
+        grouper = build_synonym_grouper_from_env()
+        tasks.append(asyncio.create_task(taxonomy_merge_forever(session_factory, grouper)))
+        log.info("taxonomy synonym merge enabled")
+    else:
+        log.info("taxonomy synonym merge disabled (TAXONOMY_MERGE_ENABLED off)")
 
     await asyncio.gather(*tasks)
 

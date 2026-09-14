@@ -16,6 +16,7 @@ import datetime as dt
 import logging
 import math
 import re
+from typing import Protocol
 
 log = logging.getLogger("newsroom.analyze.taxonomy")
 
@@ -265,3 +266,140 @@ def load_top_nodes(session, *, limit: int = 25, min_depth: int = 1) -> list[dict
                  key=lambda n: (n.heat, n.heat_events), reverse=True)[:limit]
     return [{"path": node_path_labels(all_nodes, n.id), "heat": round(n.heat, 3),
              "events": n.heat_events, "depth": n.depth} for n in hot]
+
+
+# --- synonym-node merge (charter v0.3: keep the learned tree from fragmenting) --
+
+class SynonymGrouper(Protocol):
+    model: str
+
+    def group(self, nodes: list[tuple[int, str]]) -> list[list[int]]: ...
+
+
+DEFAULT_MERGE_PROMPT = """Нижче — дочірні теми ОДНОГО батьківського вузла дерева тем
+(id і назва). Згрупуй ТІ, ЩО ОЗНАЧАЮТЬ ОДНУ Й ТУ САМУ ТЕМУ (синоніми чи різні
+формулювання одного: «удар бпла» / «атака дронів» / «дронова атака»; «смартфон» /
+«телефон»). НЕ групуй просто пов'язані чи сусідні теми: «удар бпла» і «удар каб» —
+РІЗНІ; «одеса» і «львів» — РІЗНІ.
+
+Поверни лише JSON: {"groups": [[id, id, ...], ...]} — лише групи з 2+ синонімів.
+
+ТЕМИ:
+{nodes}"""
+
+
+def _render_nodes(nodes: list[tuple[int, str]]) -> str:
+    return "\n".join(f"[{nid}] {(label or '').strip()}" for nid, label in nodes)
+
+
+class LLMSynonymGrouper:  # pragma: no cover - network
+    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini",
+                 prompt: str = DEFAULT_MERGE_PROMPT):
+        import os
+
+        self.model = model
+        self.prompt = prompt
+        self._api_key = api_key or os.environ["OPENAI_API_KEY"]
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(api_key=self._api_key)
+        return self._client
+
+    def group(self, nodes: list[tuple[int, str]]) -> list[list[int]]:
+        from newsroom.editorial.dedup import parse_groups
+        from newsroom.promptutil import fill_prompt
+
+        valid = {nid for nid, _ in nodes}
+        if len(valid) < 2:
+            return []
+        content = fill_prompt(self.prompt, nodes=_render_nodes(nodes))
+        try:
+            resp = self._ensure_client().chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            return parse_groups(resp.choices[0].message.content, valid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("synonym group failed", extra={"error": str(exc)})
+            return []
+
+
+def merge_node(session, victim_id: int, canonical_id: int) -> None:
+    """Merge sibling node `victim` into `canonical`: re-point victim's children (recursing
+    on a slug collision so grandchildren fold together too) and its events, add up
+    event_count, then delete victim. Caller commits."""
+    from sqlalchemy import select, update
+
+    from newsroom.models import Event, TaxonomyNode
+
+    if victim_id == canonical_id:
+        return
+    victim = session.get(TaxonomyNode, victim_id)
+    canonical = session.get(TaxonomyNode, canonical_id)
+    if victim is None or canonical is None:
+        return
+
+    children = list(session.execute(
+        select(TaxonomyNode).where(TaxonomyNode.parent_id == victim_id)).scalars())
+    canon_children = {c.slug: c for c in session.execute(
+        select(TaxonomyNode).where(TaxonomyNode.parent_id == canonical_id)).scalars()}
+    for child in children:
+        existing = canon_children.get(child.slug)
+        if existing is not None and existing.id != child.id:
+            merge_node(session, child.id, existing.id)      # same-slug grandchild -> recurse
+        else:
+            child.parent_id = canonical_id
+            canon_children[child.slug] = child
+    session.flush()
+
+    session.execute(update(Event).where(Event.topic_leaf_id == victim_id)
+                    .values(topic_leaf_id=canonical_id))
+    canonical.event_count = (canonical.event_count or 0) + (victim.event_count or 0)
+    session.flush()
+    session.delete(victim)
+    session.flush()
+
+
+def merge_synonym_nodes(session_factory, grouper: "SynonymGrouper", *, limit_parents: int = 500) -> dict:
+    """One merge tick: for each parent with 2+ children, ask the grouper which children are
+    the SAME topic and fold synonyms into a canonical node (the one with the most events).
+    Keeps the learned tree from fragmenting into near-duplicate topics (analog of the dedup
+    story-merge). Returns {merged, groups}."""
+    from collections import defaultdict
+
+    from sqlalchemy import select
+
+    from newsroom.models import TaxonomyNode
+
+    with session_factory() as s:
+        rows = s.execute(select(TaxonomyNode.id, TaxonomyNode.parent_id,
+                                TaxonomyNode.label, TaxonomyNode.event_count)).all()
+    by_parent: dict[int | None, list[tuple[int, str, int]]] = defaultdict(list)
+    for nid, pid, label, ec in rows:
+        by_parent[pid].append((nid, label, ec or 0))
+
+    merged = 0
+    groups_found = 0
+    for children in list(by_parent.values())[:limit_parents]:
+        if len(children) < 2:
+            continue
+        groups = grouper.group([(nid, label) for nid, label, _ in children])
+        if not groups:
+            continue
+        ec_map = {nid: ec for nid, _, ec in children}
+        with session_factory() as s:
+            for group in groups:
+                canonical = max(group, key=lambda nid: (ec_map.get(nid, 0), -nid))  # most events, tie->lowest id
+                for nid in group:
+                    if nid != canonical:
+                        merge_node(s, nid, canonical)
+                        merged += 1
+                groups_found += 1
+            s.commit()
+    return {"merged": merged, "groups": groups_found}

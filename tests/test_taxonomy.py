@@ -208,3 +208,93 @@ def test_refresh_clears_stale_heat(pg_engine):
     refresh_taxonomy_heat(sf, window_hours=24)
     with sf() as s:
         assert s.get(TaxonomyNode, leaf).heat == 0.0 and s.get(TaxonomyNode, leaf).heat_events == 0
+
+
+# --- synonym-node merge (pg) --------------------------------------------------
+
+class FakeSynonymGrouper:
+    model = "fake-syn"
+
+    def __init__(self, label_groups):
+        self.label_groups = [set(g) for g in label_groups]
+        self.seen: list[list[str]] = []
+
+    def group(self, nodes):
+        self.seen.append([lab for _, lab in nodes])
+        by_label = {lab: nid for nid, lab in nodes}
+        out = []
+        for grp in self.label_groups:
+            ids = [by_label[lab] for lab in grp if lab in by_label]
+            if len(ids) >= 2:
+                out.append(ids)
+        return out
+
+
+@pytest.mark.pg
+def test_merge_synonym_nodes_folds_siblings(pg_engine):
+    from sqlalchemy import select
+
+    from newsroom.analyze.taxonomy import merge_synonym_nodes
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, TaxonomyNode
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with sf() as s:
+        a = ingest_path(s, ["війна", "атака рф", "удар бпла"])
+        b = ingest_path(s, ["війна", "атака рф", "атака дронів"])
+        s.get(TaxonomyNode, a).event_count = 5      # canonical-to-be (more events)
+        s.get(TaxonomyNode, b).event_count = 2
+        s.add(Event(status="confirmed", title="e1", topic_leaf_id=a, first_seen_at=now))
+        s.add(Event(status="confirmed", title="e2", topic_leaf_id=b, first_seen_at=now))
+        s.commit()
+
+    grouper = FakeSynonymGrouper([{"удар бпла", "атака дронів"}])
+    stats = merge_synonym_nodes(sf, grouper)
+    assert stats["merged"] == 1 and stats["groups"] == 1
+
+    with sf() as s:
+        slugs = {n.slug for n in s.execute(select(TaxonomyNode)).scalars()}
+        assert "атака дронів" not in slugs and "удар бпла" in slugs      # victim gone, canonical kept
+        canon = s.execute(select(TaxonomyNode).where(TaxonomyNode.slug == "удар бпла")).scalar_one()
+        assert canon.event_count == 7                                    # 5 + 2 summed
+        assert {e.topic_leaf_id for e in s.execute(select(Event)).scalars()} == {canon.id}
+
+
+@pytest.mark.pg
+def test_merge_node_recurses_on_slug_collision(pg_engine):
+    from sqlalchemy import select
+
+    from newsroom.analyze.taxonomy import merge_node
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, TaxonomyNode
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with sf() as s:
+        # two sibling subtrees under "війна", each with a grandchild "одеса"
+        ingest_path(s, ["війна", "атака дронів", "одеса"])
+        ingest_path(s, ["війна", "удар бпла", "одеса"])
+        s.commit()
+    with sf() as s:
+        victim = s.execute(select(TaxonomyNode).where(TaxonomyNode.slug == "атака дронів")).scalar_one().id
+        canon = s.execute(select(TaxonomyNode).where(TaxonomyNode.slug == "удар бпла")).scalar_one().id
+        vic_od = s.execute(select(TaxonomyNode).where(
+            TaxonomyNode.parent_id == victim, TaxonomyNode.slug == "одеса")).scalar_one().id
+        can_od = s.execute(select(TaxonomyNode).where(
+            TaxonomyNode.parent_id == canon, TaxonomyNode.slug == "одеса")).scalar_one().id
+        s.get(TaxonomyNode, vic_od).event_count = 3
+        s.get(TaxonomyNode, can_od).event_count = 4
+        s.add(Event(status="confirmed", title="e", topic_leaf_id=vic_od, first_seen_at=now))
+        s.commit()
+    with sf() as s:
+        merge_node(s, victim, canon)
+        s.commit()
+
+    with sf() as s:
+        assert s.get(TaxonomyNode, victim) is None                       # victim removed
+        odesas = s.execute(select(TaxonomyNode).where(
+            TaxonomyNode.parent_id == canon, TaxonomyNode.slug == "одеса")).scalars().all()
+        assert len(odesas) == 1 and odesas[0].id == can_od               # grandchildren folded into one
+        assert odesas[0].event_count == 7                                # 4 + 3
+        assert s.execute(select(Event)).scalar_one().topic_leaf_id == can_od   # event re-pointed
