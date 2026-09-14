@@ -111,10 +111,15 @@ class LLMDedupGrouper:  # pragma: no cover - network
 
 
 def dedup_pending(session_factory, grouper: "DedupGrouper", *, window_hours: int = 24,
-                  limit: int = 50) -> dict[str, int]:
+                  limit: int = 80) -> dict[str, int]:
     """One dedup tick: group the recent window of postable events and mark
     non-canonical duplicates (events.duplicate_of), so only one of a duplicate set
-    is drafted/published. Idempotent — re-marking the same duplicate is a no-op."""
+    is drafted/published. Idempotent — re-marking the same duplicate is a no-op.
+
+    Scans the MOST RECENT `limit` events (not the oldest): at scale there are far more
+    than `limit` postable events in the window, and fresh cross-source duplicates
+    cluster in time (the same story from N sources within minutes), so recency is
+    where dedup pays off. `canonical = min(id)` still keeps the earliest as the kept one."""
     import datetime as dt
 
     from sqlalchemy import select
@@ -127,7 +132,7 @@ def dedup_pending(session_factory, grouper: "DedupGrouper", *, window_hours: int
             select(Event.id, Event.title)
             .where(Event.status.in_(POSTABLE_STATUSES), Event.first_seen_at >= cutoff,
                    Event.title.is_not(None))
-            .order_by(Event.id)
+            .order_by(Event.first_seen_at.desc())
             .limit(limit)
         ).all()
 
