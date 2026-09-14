@@ -180,17 +180,27 @@ def report_publications(session_factory, *, limit: int = 10) -> str:
 
 
 def report_topics(session_factory, *, limit: int = 25) -> str:
+    from newsroom.analyze.taxonomy import load_top_nodes
     from newsroom.analyze.topics import load_hot_topics_detail
 
     with session_factory() as s:
         topics = load_hot_topics_detail(s)
-    if not topics:
-        return ("Гарячих тем ще нема (потрібні події з ключовими словами; "
-                "TOPICS_ENABLED + класифікатор).")
-    rows = [[t.get("topic", ""), t.get("events", 0), t.get("posts", 0), f"{t.get('heat', 0):.2f}"]
-            for t in topics[:limit]]
-    return _pre("Гарячі теми (з постів конкурентів)\n\n"
-                + _table(["тема", "події", "пости", "heat"], rows))
+        nodes = load_top_nodes(s, limit=limit)
+
+    parts: list[str] = []
+    if nodes:
+        node_rows = [[" → ".join(n["path"]), n["events"], f"{n['heat']:.2f}"] for n in nodes]
+        parts.append(_pre("Піраміда тем (heat із залученості конкурентів)\n\n"
+                          + _table(["шлях теми", "події", "heat"], node_rows)))
+    if topics:
+        kw_rows = [[t.get("topic", ""), t.get("events", 0), t.get("posts", 0), f"{t.get('heat', 0):.2f}"]
+                   for t in topics[:limit]]
+        parts.append(_pre("Гарячі ключові слова (з постів конкурентів)\n\n"
+                          + _table(["слово", "події", "пости", "heat"], kw_rows)))
+    if not parts:
+        return ("Гарячих тем ще нема (потрібні події з topic_path і метрики конкурентів; "
+                "TOPICS_ENABLED + класифікатор + збір метрик).")
+    return "\n\n".join(parts)
 
 
 def report_demand(session_factory) -> str:

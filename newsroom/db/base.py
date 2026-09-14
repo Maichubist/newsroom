@@ -51,6 +51,10 @@ _ADDITIVE_COLUMNS = (
     # learned taxonomy pyramid (charter v0.3 §3.1)
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS topic_path jsonb",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS topic_leaf_id bigint",
+    # taxonomy node engagement heat (Phase 2)
+    "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat double precision DEFAULT 0.0",
+    "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat_events integer DEFAULT 0",
+    "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat_at timestamptz",
     # local media file deleted after publication (phash reuse-archive stays in DB)
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS purged_at timestamptz",
     # Telegram message id for re-fetching url-less media via Telethon

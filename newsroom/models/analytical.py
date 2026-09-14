@@ -105,7 +105,12 @@ class TaxonomyNode(Base):
     slug: Mapped[str] = mapped_column(String(120))          # normalized label (match key)
     label: Mapped[str] = mapped_column(String(200))         # display label as first seen
     depth: Mapped[int] = mapped_column(Integer, default=0)
-    event_count: Mapped[int] = mapped_column(Integer, default=0)   # how many events reference this node (incl. via descendants roll-up done at query time)
+    event_count: Mapped[int] = mapped_column(Integer, default=0)   # lifetime count of events whose path passes through this node
+    # engagement heat (Phase 2): recency-weighted Telegram engagement rolled up the tree,
+    # normalized within the node's depth level to [0,1]; recomputed each analytics tick.
+    heat: Mapped[float] = mapped_column(Float, default=0.0)
+    heat_events: Mapped[int] = mapped_column(Integer, default=0)   # events under this node in the heat window
+    heat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
