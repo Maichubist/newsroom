@@ -27,7 +27,7 @@ from typing import Protocol
 from newsroom.analyze.clustering import DEFAULT_THRESHOLD, DEFAULT_WINDOW_HOURS, EventClusterer
 from newsroom.analyze.independence import SourceItem, independent_source_count
 from newsroom.analyze.risk import RiskMatrix, decide
-from newsroom.analyze.signal import FiltersConfig, classify_noise, ipso_markers
+from newsroom.analyze.signal import FiltersConfig, classify_noise, ipso_markers, is_air_alert
 from newsroom.analyze.stoplist import StopRule, check as stoplist_check, worst_action
 
 
@@ -103,6 +103,14 @@ class Verifier:
             self._set_item_status(item_id, "filtered_out")
             self._journal("item", item_id, "filter", "noise", ",".join(noise.reasons))
             return VerifyResult("filtered_out", reason="noise:" + ",".join(noise.reasons))
+
+        # 1b. transient air-situation drone alert ("БпЛА над містом", "курсом на…",
+        #     "в укриття") -> drop. High-volume real-time monitoring, not news; a strike
+        #     WITH a consequence or a nightly summary is excluded and kept (see signal.py).
+        if is_air_alert(title, text, self.filters):
+            self._set_item_status(item_id, "filtered_out")
+            self._journal("item", item_id, "filter", "air_alert", "transient_drone_alert")
+            return VerifyResult("filtered_out", reason="air_alert")
 
         # 2. embed + persist + cluster into an event (cheap; runs before the LLM so
         #    reprints collapse into one event before we pay to classify)

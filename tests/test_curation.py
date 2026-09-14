@@ -7,36 +7,30 @@ from sqlalchemy.orm import Session
 
 from newsroom.editorial.curation import (
     Candidate,
-    _is_memorial,
     curate_pending,
     must_publish,
     parse_ranking,
 )
 
 
-def test_is_memorial_detects_individual_loss():
-    assert _is_memorial("На Сумщині загинув військовий Володимир Гринь") is True
-    assert _is_memorial("Прощання з Героєм у Львові") is True
-    assert _is_memorial("на щиті повернувся боєць") is True
-    # mass-casualty / general war news is NOT an individual memorial
-    assert _is_memorial("Унаслідок удару по Краматорську загинули двоє людей") is False
-    assert _is_memorial("Зеленський підписав указ") is False
-
-
 # --- must_publish (offline) ---------------------------------------------------
 
-def test_must_publish_critical_with_official():
-    assert must_publish(risk_level="critical", has_official_source=True) is True
-    assert must_publish(risk_level="critical", has_official_source=False) is False  # needs official
+def test_must_publish_only_refutation():
+    # refutation (a correction) always goes out without the ranker...
+    assert must_publish(update_type="refutation") is True
 
 
-def test_must_publish_refutation_always():
-    assert must_publish(risk_level="low", has_official_source=False, update_type="refutation") is True
+def test_must_publish_critical_now_goes_to_ranker():
+    # the critical+official auto-publish was removed: breaking critical news is now judged
+    # by the editorial ranker, not force-published
+    assert must_publish(risk_level="critical", has_official_source=True) is False
+    assert must_publish(risk_level="critical", has_official_source=False) is False
 
 
 def test_must_publish_ordinary_is_not():
     assert must_publish(risk_level="high", has_official_source=False) is False
     assert must_publish(risk_level="low", has_official_source=True) is False
+    assert must_publish(update_type="new_fact") is False
 
 
 # --- parse_ranking (offline) --------------------------------------------------
@@ -73,7 +67,10 @@ class FakeRanker:
 
 
 @pytest.mark.pg
-def test_memorial_routed_to_ranker_not_must_publish(pg_engine):
+def test_critical_events_go_through_the_ranker(pg_engine):
+    # critical no longer auto-publishes: BOTH a content-free individual memorial and a
+    # genuine breaking strike are judged by the editor, which holds the memorial and
+    # publishes the breaking one.
     from newsroom.db import make_session_factory
     from newsroom.models import Event, EventItem, Item, Source
 
@@ -98,11 +95,10 @@ def test_memorial_routed_to_ranker_not_must_publish(pg_engine):
         mem_id, break_id = mem.id, breaking.id
         s.commit()
 
-    ranker = FakeRanker({mem_id: "hold"})     # editor holds the individual memorial
+    ranker = FakeRanker({mem_id: "hold", break_id: "publish"})
     curate_pending(sf, ranker, significance_threshold=0.55)
 
-    assert mem_id in ranker.seen              # memorial went through the editor...
-    assert break_id not in ranker.seen        # ...breaking critical+official is must-publish
+    assert mem_id in ranker.seen and break_id in ranker.seen   # both went through the editor
     with Session(pg_engine) as s:
         assert s.get(Event, mem_id).curated == "hold"
         assert s.get(Event, break_id).curated == "publish"
@@ -190,7 +186,7 @@ def test_curate_pending_attaches_topic_heat_to_ranker(pg_engine):
 
 
 @pytest.mark.pg
-def test_curate_pending_must_publish_bypasses_ranker_and_ranks_the_rest(pg_engine):
+def test_curate_pending_refutation_bypasses_ranker_and_ranks_the_rest(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Event, EventItem, Item, Source
 
@@ -201,10 +197,12 @@ def test_curate_pending_must_publish_bypasses_ranker_and_ranks_the_rest(pg_engin
                           tier="official", is_official=True)
         s.add(official)
         s.flush()
-        # critical + official -> must-publish (no ranker)
-        e_must = Event(status="confirmed", risk_level="critical", rubric="war", title="Удар",
+        # a refutation (correction) -> must-publish, never reaches the ranker
+        e_must = Event(status="confirmed", risk_level="high", rubric="politics", title="Спростування",
+                       update_type="refutation", significance=0.8, first_seen_at=now)
+        # a critical event is NO LONGER auto-published: it goes to the ranker like the rest
+        e_crit = Event(status="confirmed", risk_level="critical", rubric="war", title="Удар",
                        significance=0.9, first_seen_at=now)
-        # significant, low-risk -> goes to the ranker
         e_pub = Event(status="confirmed", risk_level="low", rubric="economy", title="Курс",
                       significance=0.8, first_seen_at=now)
         e_hold = Event(status="confirmed", risk_level="low", rubric="sport", title="Матч",
@@ -212,25 +210,25 @@ def test_curate_pending_must_publish_bypasses_ranker_and_ranks_the_rest(pg_engin
         # below the significance bar -> not even considered
         e_low = Event(status="confirmed", risk_level="low", rubric="culture", title="Дрібниця",
                       significance=0.2, first_seen_at=now)
-        s.add_all([e_must, e_pub, e_hold, e_low])
+        s.add_all([e_must, e_crit, e_pub, e_hold, e_low])
         s.flush()
         it = Item(source_id=official.id, external_id="o1", content_hash="o1".ljust(64, "0"), title="t")
         s.add(it)
         s.flush()
-        s.add(EventItem(event_id=e_must.id, item_id=it.id, role="official"))
-        ids = {"must": e_must.id, "pub": e_pub.id, "hold": e_hold.id, "low": e_low.id}
+        s.add(EventItem(event_id=e_crit.id, item_id=it.id, role="official"))
+        ids = {"must": e_must.id, "crit": e_crit.id, "pub": e_pub.id, "hold": e_hold.id, "low": e_low.id}
         s.commit()
 
-    ranker = FakeRanker({ids["pub"]: "publish", ids["hold"]: "hold"})
+    ranker = FakeRanker({ids["crit"]: "publish", ids["pub"]: "publish", ids["hold"]: "hold"})
     stats = curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
 
-    assert stats["must"] == 1 and stats["publish"] == 2 and stats["hold"] == 1
-    assert ids["must"] not in ranker.seen          # must-publish never reached the LLM
-    assert set(ranker.seen) == {ids["pub"], ids["hold"]}
+    assert stats["must"] == 1 and stats["publish"] == 3 and stats["hold"] == 1
+    assert ids["must"] not in ranker.seen          # the refutation never reached the LLM
+    assert set(ranker.seen) == {ids["crit"], ids["pub"], ids["hold"]}   # critical is ranked now
     with Session(pg_engine) as s:
         from newsroom.models import Event
         curated = {eid: s.get(Event, eid).curated for eid in ids.values()}
-        assert curated == {ids["must"]: "publish", ids["pub"]: "publish",
+        assert curated == {ids["must"]: "publish", ids["crit"]: "publish", ids["pub"]: "publish",
                            ids["hold"]: "hold", ids["low"]: None}
 
     # idempotent: already curated -> nothing to do

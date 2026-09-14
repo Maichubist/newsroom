@@ -73,9 +73,20 @@ def test_ukraine_relevant_is_kept_even_in_low_rubric():
     assert _passes("society", "У Києві відкрили новий транспортний вузол") is True
 
 
-def test_critical_is_never_dropped_for_significance():
-    # even a locality-sensitive, foreign-looking critical item is floored above threshold
-    assert _passes("crime", "Explosion reported abroad", risk="critical") is True
+def test_critical_is_scored_on_merit_no_floor():
+    # the critical floor was removed: risk_level no longer auto-passes. A war item scores
+    # on its rubric weight (0.90) and passes on merit...
+    assert _passes("war", "Ракетний удар по Києву", risk="critical") is True
+    # ...but a locality-sensitive, foreign-looking critical item is NOT floored above the
+    # threshold any more (it now scores on merit and can fall below it).
+    assert _passes("crime", "Explosion reported abroad", risk="critical") is False
+
+
+def test_risk_level_does_not_change_the_score():
+    # significance is independent of risk_level now (official sourcing is a separate gate)
+    a = significance_score(SignificanceInputs(rubric="war", text="Обстріл Києва", risk_level="critical"), CFG).score
+    b = significance_score(SignificanceInputs(rubric="war", text="Обстріл Києва", risk_level=None), CFG).score
+    assert a == b
 
 
 def test_corroboration_lifts_score():

@@ -4,10 +4,10 @@ Instead of throttling output to N posts/hour, we decide *which* events are worth
 publishing and let the count follow the news — a quiet window yields few posts, a
 big-news window yields more. Two paths:
 
-  * must_publish — deterministic: a critical event with an official source, or a
-    refutation (a correction must go out). These are marked publish without the LLM,
-    so breaking news never waits on the ranker.
-  * the rest — a **comparative** LLM pass over the recent window of candidates marks
+  * must_publish — deterministic: ONLY a refutation (a correction must go out). It is
+    marked publish without the LLM so a correction is never held or delayed.
+  * everything else — including breaking critical news — a **comparative** LLM pass over
+    the recent window of candidates marks
     each publish/hold ("would a serious Ukrainian news+analysis channel run this?").
     Comparative-in-a-batch, not an absolute score (CLAUDE.md).
 
@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -34,31 +33,15 @@ CURATE_PUBLISH = "publish"
 CURATE_HOLD = "hold"
 POSTABLE_STATUSES = ("reported", "confirmed", "rumor")
 
-# Individual loss/obituary phrasing. Such a report about a specific, non-public
-# person is important and worthy but not mass-interest — we don't auto must-publish
-# it; the editor (ranker) decides, and holds unknown-individual ones. A mass-casualty
-# strike ("унаслідок удару загинули N") carries an attack marker and is reserved to
-# the attacks digest before curation, so it does not reach this check.
-_MEMORIAL_MARKERS = re.compile(
-    r"загин(ув|ула) (військов|бо[єе]ць|захисник|воїн|герой|солдат|сержант|офіцер)"
-    r"|на щиті|попрощал|прощання з|світла пам|вічна пам|не стало|"
-    r"віддали (останню )?шану|полягл", re.IGNORECASE)
 
-
-def _is_memorial(text: str | None) -> bool:
-    return bool(_MEMORIAL_MARKERS.search(text or ""))
-
-
-def must_publish(*, risk_level: str | None, has_official_source: bool,
+def must_publish(*, risk_level: str | None = None, has_official_source: bool = False,
                  update_type: str | None = None) -> bool:
-    """Deterministic must-publish: a critical event confirmed by an official source
-    (breaking safety/war) or a refutation (a correction always goes out). These skip
-    the ranker so they are never held or delayed by it."""
-    if (risk_level or "").lower() == "critical" and has_official_source:
-        return True
-    if (update_type or "").lower() == "refutation":
-        return True
-    return False
+    """Deterministic must-publish: ONLY a refutation (a correction must always go out,
+    charter). Everything else — including breaking critical+official news — now goes
+    through the editorial ranker, so content is judged and content-free war alerts no
+    longer auto-publish. (risk_level/has_official_source are kept for signature
+    stability but no longer force a publish.)"""
+    return (update_type or "").lower() == "refutation"
 
 
 @dataclass(frozen=True)
@@ -141,6 +124,12 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
   обговорюють у стрічці конкурентів (гаряча = багато постів + залученість зараз).
   Гаряча тема — сильний сигнал на користь публікації, поки вона в тренді.
 
+ПУБЛІКУВАТИ обов'язково — справді значущі безпекові/фронтові події: великі удари з
+наслідками (жертви, руйнування, влучання по інфраструктурі), помітна ескалація,
+важливі офіційні рішення й заяви щодо оборони. Рутинні алерти повітряної обстановки
+(проліт/рух БпЛА без наслідків) сюди НЕ потрапляють — їх уже відсіяно або зведено в
+окремий дайджест обстрілів, тож не публікуй поштучні «БпЛА над містом».
+
 ПРИТРИМАти (hold) — дрібне, вузьконішеве, прохідне, дубль уже відомого, суто
 розважальне без ширшого значення, або важливе-але-рутинне з низьким попитом.
 Окремо: повідомлення про загибель КОНКРЕТНОЇ людини, невідомої широкому загалу
@@ -221,9 +210,9 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
     by the LLM. Only publish-marked events are later drafted."""
     import datetime as dt
 
-    from sqlalchemy import func, select
+    from sqlalchemy import select
 
-    from newsroom.models import Decision, Event, EventItem, Item, Source
+    from newsroom.models import Decision, Event
 
     now = dt.datetime.now(dt.timezone.utc)
     cutoff = now - dt.timedelta(hours=window_hours)
@@ -252,26 +241,18 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         if not rows:
             return {"curated": 0, "publish": 0, "hold": 0, "must": 0}
 
-        # which events have an official source (for must_publish)
-        event_ids = [r[0] for r in rows]
-        official_ids = set(s.execute(
-            select(EventItem.event_id).join(Item, Item.id == EventItem.item_id)
-            .join(Source, Source.id == Item.source_id)
-            .where(EventItem.event_id.in_(event_ids), Source.is_official.is_(True))
-            .distinct()
-        ).scalars().all())
         demand_by_rubric = load_demand(s)      # learned audience demand per rubric ({} until data)
         hot = load_hot_topics(s)               # data-driven hot-topic heat ({} until data)
 
     decisions: dict[int, str] = {}
+    must_ids: set[int] = set()
     to_rank: list[Candidate] = []
     for eid, title, rubric, risk, sig, fact_base, update_type, keywords in rows:
-        # an individual loss/obituary must go through the editor (not the must-publish
-        # fast path), so an unknown-person memorial can be held
-        memorial = _is_memorial(title)
-        if not memorial and must_publish(risk_level=risk, has_official_source=eid in official_ids,
-                                         update_type=update_type):
+        # only a refutation skips the editor (a correction must go out); everything else,
+        # breaking critical news included, is judged comparatively by the ranker
+        if must_publish(update_type=update_type):
             decisions[eid] = CURATE_PUBLISH
+            must_ids.add(eid)
         else:
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
                                      significance=sig, facts=_facts_brief(fact_base),
@@ -292,7 +273,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             s.add(Decision(
                 entity_type="event", entity_id=str(eid), stage="edit",
                 decision=f"curate_{decision}", reason=None,
-                details={"must": eid in official_ids and decision == CURATE_PUBLISH},
+                details={"must": eid in must_ids},
                 model=getattr(ranker, "model", None),
             ))
             stats["curated"] += 1

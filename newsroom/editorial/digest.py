@@ -66,6 +66,17 @@ def load_digest_config(path: str | Path) -> DigestConfig:
         raise DigestConfigError(f"bad digest config: {exc}") from exc
 
 
+def _attack_blob(title: str | None, fact_base: object) -> str:
+    """Title plus the fact texts of an event — the text is_attack scans. Alerts often
+    carry the attack words only in the body, so the bare title is not enough."""
+    parts: list[str] = [title or ""]
+    if isinstance(fact_base, dict):
+        for f in (fact_base.get("facts") or []):
+            if isinstance(f, dict) and f.get("text"):
+                parts.append(str(f["text"]))
+    return "\n".join(parts)
+
+
 def is_attack(rubric: str | None, text: str | None, config: DigestConfig) -> bool:
     """True when the event is a routine attack/shelling report: an attack-class
     rubric AND a marker in the text. Both required, so a policy piece about the war
@@ -121,18 +132,23 @@ def reserve_attacks(session_factory, config: DigestConfig, *, window_hours: int 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
-            select(Event.id, Event.rubric, Event.title)
+            select(Event.id, Event.rubric, Event.title, Event.fact_base)
+            # scan the MOST RECENT events, not the oldest: at scale (~900 events/day) an
+            # id-asc scan never reaches today's attacks before curation must-publishes them
             .where(Event.status.in_(("reported", "confirmed", "rumor")),
                    Event.curated.is_(None), Event.duplicate_of.is_(None),
                    Event.id.not_in(have_pub),        # already posted individually -> don't digest it too
                    Event.first_seen_at >= cutoff, Event.title.is_not(None))
-            .order_by(Event.id).limit(limit)
+            .order_by(Event.first_seen_at.desc()).limit(limit)
         ).all()
 
     reserved = 0
     with session_factory() as s:
-        for eid, rubric, title in rows:
-            if not is_attack(rubric, title, config):
+        for eid, rubric, title, fact_base in rows:
+            # match the marker against title + fact text, not the bare title: monitoring
+            # channels post headline-less alerts ("⚠ Одеса") with the attack words only
+            # in the body, so a title-only check would miss them and let them be posted.
+            if not is_attack(rubric, _attack_blob(title, fact_base), config):
                 continue
             ev = s.get(Event, eid)
             if ev is None or ev.curated is not None:

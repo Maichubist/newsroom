@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from newsroom.editorial.digest import (
+    _attack_blob,
     compose_digest,
     due_windows,
     is_attack,
@@ -32,6 +33,16 @@ def test_is_attack_needs_rubric_and_marker():
     assert is_attack("war", "Ударний БпЛА атакував Миколаїв", CFG) is True
     assert is_attack("war", "Зеленський підписав указ про бюджет", CFG) is False   # war but no attack marker
     assert is_attack("economy", "Обстріл спричинив зростання цін", CFG) is False   # marker but wrong rubric
+
+
+def test_attack_blob_reads_title_and_facts():
+    # a headline-less monitoring alert carries the marker only in the fact base
+    fb = {"facts": [{"text": "Ударний БпЛА над містом, курсом на центр"}, {"text": ""}]}
+    blob = _attack_blob("⚠ Одеса", fb)
+    assert "⚠ Одеса" in blob and "Ударний БпЛА" in blob
+    assert is_attack("war", blob, CFG) is True          # matched via the body...
+    assert is_attack("war", _attack_blob("⚠ Одеса", None), CFG) is False   # ...title alone would miss
+    assert _attack_blob("t", {"facts": "not-a-list"}) == "t"               # malformed fact_base is safe
 
 
 # --- composition (offline) ----------------------------------------------------
@@ -87,6 +98,29 @@ def test_reserve_attacks_marks_only_attacks(pg_engine):
         assert s.get(Event, pol_id).curated is None         # politics untouched
     # idempotent
     assert reserve_attacks(sf, CFG)["reserved"] == 0
+
+
+@pytest.mark.pg
+def test_reserve_catches_headline_less_alert_via_facts(pg_engine):
+    # the real-world miss: a monitoring alert titled "⚠ Одеса" with the attack words only
+    # in the fact base must still be reserved (a title-only check would let it be posted).
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        ev = Event(status="confirmed", rubric="war", title="⚠ Одеса",
+                   fact_base={"facts": [{"text": "Ударний БпЛА над містом, курсом на центр"}]},
+                   first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        eid = ev.id
+        s.commit()
+
+    assert reserve_attacks(sf, CFG)["reserved"] == 1
+    with Session(pg_engine) as s:
+        assert s.get(Event, eid).curated == "digest"
 
 
 @pytest.mark.pg

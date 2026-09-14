@@ -49,7 +49,6 @@ class SignificanceConfig:
     routine_penalty: float = 0.20
     routine_min_events: int = 8         # theme with at least this many events...
     routine_min_days: float = 4.0       # ...spread over at least this many days = chronic
-    critical_floor: float = 0.95
     default_weight: float = 0.50
     default_locality_sensitive: bool = True
     rubrics: dict[str, RubricWeight] = field(default_factory=dict)
@@ -86,7 +85,6 @@ def load_significance_config(path: str | Path) -> SignificanceConfig:
             routine_penalty=float(data.get("routine_penalty", 0.20)),
             routine_min_events=int(data.get("routine_min_events", 8)),
             routine_min_days=float(data.get("routine_min_days", 4.0)),
-            critical_floor=float(data.get("critical_floor", 0.95)),
             default_weight=float(data.get("default_weight", 0.50)),
             default_locality_sensitive=bool(data.get("default_locality_sensitive", True)),
             rubrics=rubrics,
@@ -166,10 +164,11 @@ def significance_score(inp: SignificanceInputs, config: SignificanceConfig) -> S
 
     score = max(0.0, min(1.0, score))
 
-    if (inp.risk_level or "").lower() == "critical":
-        score = max(score, config.critical_floor)
-        reasons.append("critical_floor")
-
+    # No critical floor: war/defense/strikes score on merit like everything else, so a
+    # content-free "⚠ Одеса" air alert no longer auto-passes. Every event now earns its
+    # way past the significance pre-filter and is judged by the editorial ranker; the
+    # attacks digest still folds routine shelling, and the risk gate (official source,
+    # stop-list) is a SEPARATE guard that critical topics still face.
     return ScoreResult(score=score, passes=score >= config.threshold, reasons=reasons)
 
 
