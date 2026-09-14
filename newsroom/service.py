@@ -100,6 +100,10 @@ def demand_metrics_enabled() -> bool:
     return os.getenv("DEMAND_METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def telegram_autosync_subs_enabled() -> bool:
+    return os.getenv("TELEGRAM_AUTOSYNC_SUBS", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def topics_enabled() -> bool:
     return os.getenv("TOPICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -654,6 +658,26 @@ async def monitoring_forever(session_factory, *, tick_seconds: float = 120.0,
         await asyncio.sleep(tick_seconds)
 
 
+async def subscriptions_sync_forever(session_factory, collector, *, tick_seconds: float = 900.0,
+                                     stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Auto-register the reading account's channel subscriptions as telegram sources via the
+    shared Telethon session, so new subscriptions are picked up without editing sources.yaml.
+    A newly-added channel is only COLLECTED after the next restart (realtime handlers are
+    registered at start); this keeps the source list in sync. Slow cadence, reads only."""
+    from newsroom.sources.discovery import list_subscribed_channels, sync_subscriptions
+
+    client = await collector.wait_client()
+    while not (stop and stop.is_set()):
+        try:
+            channels = await list_subscribed_channels(client)
+            stats = await asyncio.to_thread(sync_subscriptions, session_factory, channels)
+            if stats.get("added"):
+                log.info("subscriptions synced", extra=bind(**stats))
+        except Exception:
+            log.exception("subscription sync failed")
+        await asyncio.sleep(tick_seconds)
+
+
 async def demand_forever(session_factory, collector, *, tick_seconds: float = 1800.0,
                          sources_every: int = 4, analytics_every: int = 2,
                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
@@ -804,6 +828,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         telegram_collector = TelegramCollector(session_factory)
         tasks.append(asyncio.create_task(telegram_collector.start()))
         log.info("telegram collection enabled")
+        if telegram_autosync_subs_enabled():
+            tasks.append(asyncio.create_task(
+                subscriptions_sync_forever(session_factory, telegram_collector)))
+            log.info("telegram subscription auto-sync enabled")
+        else:
+            log.info("telegram subscription auto-sync disabled (TELEGRAM_AUTOSYNC_SUBS off)")
     else:
         log.info("telegram collection disabled (COLLECTOR_TELEGRAM_ENABLED off)")
 

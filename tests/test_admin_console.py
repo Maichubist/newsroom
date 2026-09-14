@@ -201,3 +201,18 @@ def test_report_topics_empty_then_filled(pg_engine):
         s.commit()
     out = AdminConsole(sf).handle("/topics")
     assert "Піраміда тем" in out and "війна" in out   # shows the hot path
+
+
+@pytest.mark.pg
+def test_report_subscriptions(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Source
+
+    sf = make_session_factory(pg_engine)
+    assert "нема ТГ-джерел" in AdminConsole(sf).handle("/subs")
+    with Session(pg_engine) as s:
+        s.add(Source(kind="telegram", handle_or_url="@newschan", name="Новинний канал",
+                     origin="ua", tier="media", active=True))
+        s.commit()
+    out = AdminConsole(sf).handle("/subs")
+    assert "Підписки Telegram" in out and "@newschan" in out

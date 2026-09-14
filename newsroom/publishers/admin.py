@@ -204,6 +204,29 @@ def report_demand(session_factory) -> str:
     return _pre("Попит за рубриками (0..1)\n\n" + _table(["рубрика", "індекс"], rows))
 
 
+def report_subscriptions(session_factory, *, limit: int = 15) -> str:
+    """Telegram sources tracked (auto-synced from the account's channel subscriptions) —
+    total/active and the most recently added, so the admin sees what auto-sync picked up."""
+    from sqlalchemy import func, select
+
+    from newsroom.models import Source
+
+    with session_factory() as s:
+        total = int(s.scalar(select(func.count()).select_from(Source).where(Source.kind == "telegram")) or 0)
+        active = int(s.scalar(select(func.count()).select_from(Source)
+                              .where(Source.kind == "telegram", Source.active.is_(True))) or 0)
+        recent = s.execute(
+            select(Source.name, Source.handle_or_url, Source.active, Source.created_at)
+            .where(Source.kind == "telegram").order_by(Source.created_at.desc()).limit(limit)
+        ).all()
+    head = (f"Підписки Telegram: всього {total}, активних {active}\n"
+            f"(авто-синк додає нові підписки акаунта; збиратись починають після рестарту)")
+    if not recent:
+        return _pre(html.escape(head + "\n\nЩе нема ТГ-джерел."))
+    data = [[(name or "")[:26], handle[:22], "✓" if act else "—"] for name, handle, act, _at in recent]
+    return _pre(html.escape(head) + "\n\n" + _table(["канал", "handle", "актив"], data))
+
+
 def report_sources(session_factory, *, limit: int = 30) -> str:
     from sqlalchemy import func, select
 
@@ -337,6 +360,7 @@ HELP = (
     "/topics [N] — гарячі теми з постів конкурентів\n"
     "/demand — індекс попиту за рубриками\n"
     "/sources — джерела-конкуренти й підписники\n"
+    "/subs — підписки Telegram (авто-синк нових каналів)\n"
     "/top [N] — топ постів конкурентів за залученістю\n"
     "/media — стан медіа й ТГ-завантаження\n"
     "/event &lt;id&gt; — журнал рішень події\n"
@@ -386,6 +410,8 @@ class AdminConsole:
             return report_demand(self.sf)
         if cmd == "sources":
             return report_sources(self.sf)
+        if cmd == "subs":
+            return report_subscriptions(self.sf)
         if cmd == "top":
             return report_top(self.sf, limit=_int(args, 12, lo=1, hi=30))
         if cmd == "media":
