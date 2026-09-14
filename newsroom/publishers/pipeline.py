@@ -343,9 +343,12 @@ class Publisher:
             ))
             s.commit()
 
-    def publish_pending(self, *, limit: int = 25) -> dict[str, int]:
-        """One publish tick: attempt every critic-passed draft post. If the master
-        switch is off, do nothing (and touch no network)."""
+    def publish_pending(self, *, limit: int = 1, scan: int = 60) -> dict[str, int]:
+        """One publish tick: publish up to `limit` posts, scanning up to `scan` drafts
+        by significance and SKIPPING blocked ones so a perpetually-blocked top draft
+        (e.g. a rate-limited critical post) does not head-of-line-block the queue —
+        a publishable lower post still goes out. If the master switch is off, do
+        nothing (and touch no network)."""
         from sqlalchemy import func, select
 
         from newsroom.models import Event, Publication
@@ -354,8 +357,8 @@ class Publisher:
             return {"published": 0, "blocked": 0, "disabled": 1}
 
         with self.sf() as s:
-            # most-significant first, so when the hourly cap fills it keeps the best
-            # posts and defers the rest (unscored significance sorts last as 0)
+            # most-significant first; scan a window wider than `limit` so blocked
+            # posts are stepped over, not stuck on (unscored significance sorts last)
             ids = list(s.execute(
                 select(Publication.id)
                 .join(Event, Event.id == Publication.event_id)
@@ -366,11 +369,13 @@ class Publisher:
                     Publication.features["critic_ok"].as_boolean().is_(True),
                 )
                 .order_by(func.coalesce(Event.significance, 0.0).desc(), Publication.id)
-                .limit(limit)
+                .limit(max(limit, scan))
             ).scalars().all())
 
         stats = {"published": 0, "blocked": 0, "disabled": 0}
         for pid in ids:
+            if stats["published"] >= limit:
+                break
             outcome = self.publish_one(pid)
             if outcome.skipped:
                 continue

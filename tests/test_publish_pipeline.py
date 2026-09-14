@@ -566,6 +566,39 @@ def test_media_attaches_on_reuse_alone_when_vision_disabled(pg_engine):
     assert p2.calls[0][0] == "sendMessage"
 
 
+def test_publish_skips_blocked_top_draft(pg_engine):
+    # a perpetually-blocked top draft (critical, no official source) must not stall the
+    # queue — a publishable lower-significance post still goes out.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    with Session(pg_engine) as s:
+        top = Event(status="confirmed", risk_level="critical", rubric="war", title="top",
+                    significance=0.9, first_seen_at=dt.datetime.now(UTC))     # blocks: critical_no_official
+        low = Event(status="confirmed", risk_level="low", rubric="economy", title="low",
+                    significance=0.4, first_seen_at=dt.datetime.now(UTC))     # publishable
+        s.add_all([top, low])
+        s.flush()
+        p_top = Publication(event_id=top.id, channel="telegram", kind="post", status="draft",
+                            headline="Top", body="Критична новина без офіційного джерела.",
+                            features={"critic_ok": True, "is_rumor": False})
+        p_low = Publication(event_id=low.id, channel="telegram", kind="post", status="draft",
+                            headline="Low", body="Спокійна новина з деталями.",
+                            features={"critic_ok": True, "is_rumor": False})
+        s.add_all([p_top, p_low])
+        s.flush()
+        top_id, low_id = p_top.id, p_low.id
+        s.commit()
+
+    stats = _publisher(sf, poster).publish_pending(limit=1)
+    assert stats["published"] == 1 and stats["blocked"] >= 1
+    with Session(pg_engine) as s:
+        assert s.get(Publication, low_id).status == "published"   # lower post went out
+        assert s.get(Publication, top_id).status == "draft"       # blocked top stayed a draft
+
+
 def test_publish_prefers_significant_order(pg_engine):
     # no rate cap: all curated drafts publish, but in significance order (highest first)
     from newsroom.db import make_session_factory
