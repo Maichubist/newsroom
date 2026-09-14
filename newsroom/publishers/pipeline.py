@@ -124,6 +124,18 @@ class Publisher:
                        _Event.rubric == rubric)
             ) or 0)
 
+        # posts already out for THIS event's story in the cooldown window (one/story)
+        story_recent_posts = 0
+        story_id = event.story_id if event else None
+        if story_id is not None:
+            story_recent_posts = int(s.scalar(
+                select(func.count()).select_from(Publication).join(_Event, _Event.id == Publication.event_id)
+                .where(Publication.status == "published",
+                       Publication.published_at >= now - dt.timedelta(minutes=self.limits.story_cooldown_minutes),
+                       _Event.story_id == story_id)
+            ) or 0)
+        is_refutation = bool(event and (event.update_type or "").lower() == "refutation")
+
         return GateInputs(
             stopped=is_publishing_stopped(s),
             critic_ok=bool(features.get("critic_ok", False)),
@@ -135,6 +147,8 @@ class Publisher:
             urgent_last_hour=urgent_last_hour,
             rumors_last_day=rumors_last_day,
             surge_same_rubric=surge_same_rubric,
+            story_recent_posts=story_recent_posts,
+            is_refutation=is_refutation,
         )
 
     def publish_one(self, publication_id: int) -> PublishOutcome:
@@ -367,6 +381,11 @@ class Publisher:
                     Publication.kind == "post",
                     Publication.event_id.is_not(None),
                     Publication.features["critic_ok"].as_boolean().is_(True),
+                    # honour dedup/digest at publish time: a draft may have been created
+                    # before the event was marked a duplicate or reserved to the digest
+                    Event.duplicate_of.is_(None),
+                    Event.curated.is_distinct_from("digest"),
+                    Event.curated.is_distinct_from("digested"),
                 )
                 .order_by(func.coalesce(Event.significance, 0.0).desc(), Publication.id)
                 .limit(max(limit, scan))

@@ -53,6 +53,18 @@ def test_gate_critical_requires_official_source():
     assert "critical_no_official" in d.reasons
 
 
+def test_gate_story_cooldown():
+    # a story that already posted within the window holds further posts...
+    blocked = evaluate_gate(GateInputs(critic_ok=True, risk_level="high", story_recent_posts=1), LIMITS)
+    assert "story_cooldown" in blocked.reasons
+    # ...but a refutation/correction is exempt
+    ref = evaluate_gate(GateInputs(critic_ok=True, risk_level="high", story_recent_posts=1,
+                                   is_refutation=True), LIMITS)
+    assert "story_cooldown" not in ref.reasons
+    # first post of a story goes
+    assert evaluate_gate(GateInputs(critic_ok=True, risk_level="low", story_recent_posts=0), LIMITS).allow
+
+
 def test_gate_critical_official_waiver():
     # test-channel waiver: the critical→official block is skipped
     ins = GateInputs(critic_ok=True, risk_level="critical", has_official_source=False)

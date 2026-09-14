@@ -599,6 +599,61 @@ def test_publish_skips_blocked_top_draft(pg_engine):
         assert s.get(Publication, top_id).status == "draft"       # blocked top stayed a draft
 
 
+def test_publish_skips_duplicate_of_event(pg_engine):
+    # a draft whose event was later marked duplicate_of must NOT publish (dedup at publish time)
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    with Session(pg_engine) as s:
+        canon = Event(status="confirmed", risk_level="low", rubric="economy", title="canon",
+                      significance=0.5, first_seen_at=dt.datetime.now(UTC))
+        s.add(canon)
+        s.flush()
+        dupev = Event(status="confirmed", risk_level="low", rubric="economy", title="dup",
+                      significance=0.9, duplicate_of=canon.id, first_seen_at=dt.datetime.now(UTC))
+        s.add(dupev)
+        s.flush()
+        pub = Publication(event_id=dupev.id, channel="telegram", kind="post", status="draft",
+                          headline="Dup", body="Дубль новина.", features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    _publisher(sf, poster).publish_pending(limit=5)
+    assert poster.calls == []                                  # duplicate draft never selected
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "draft"
+
+
+def test_publish_story_cooldown_holds_second_same_story_post(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication, Story
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    with Session(pg_engine) as s:
+        story = Story(slug="s-cool", title="Сюжет", state="developing", last_event_at=dt.datetime.now(UTC))
+        s.add(story)
+        s.flush()
+        for title, sig in (("e1", 0.9), ("e2", 0.8)):
+            ev = Event(status="confirmed", risk_level="low", rubric="politics", title=title,
+                       story_id=story.id, significance=sig, first_seen_at=dt.datetime.now(UTC))
+            s.add(ev)
+            s.flush()
+            s.add(Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                              headline=title, body=f"{title}: новина з деталями.",
+                              features={"critic_ok": True, "is_rumor": False}))
+        s.commit()
+
+    pub = _publisher(sf, poster)
+    assert pub.publish_pending(limit=1)["published"] == 1      # first story post goes
+    stats2 = pub.publish_pending(limit=1)
+    assert stats2["published"] == 0 and stats2["blocked"] == 1  # second held by story_cooldown
+
+
 def test_publish_prefers_significant_order(pg_engine):
     # no rate cap: all curated drafts publish, but in significance order (highest first)
     from newsroom.db import make_session_factory
@@ -643,9 +698,9 @@ def test_story_second_post_replies_to_first(pg_engine):
         s.add(story)
         s.flush()
 
-        def _draft_on_story(title):
+        def _draft_on_story(title, update_type=None):
             ev = Event(status="confirmed", risk_level="low", rubric="economy", title=title,
-                       story_id=story.id, first_seen_at=dt.datetime.now(UTC))
+                       story_id=story.id, update_type=update_type, first_seen_at=dt.datetime.now(UTC))
             s.add(ev)
             s.flush()
             pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
@@ -656,7 +711,8 @@ def test_story_second_post_replies_to_first(pg_engine):
             return pub.id
 
         first_id = _draft_on_story("Перша подія")
-        second_id = _draft_on_story("Друга подія")
+        # a refutation threads onto the story even within the per-story cooldown window
+        second_id = _draft_on_story("Спростування", update_type="refutation")
         s.commit()
 
     poster = RecordingPoster()   # each call returns message_id = 500 + call number

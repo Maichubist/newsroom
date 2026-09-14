@@ -14,3 +14,6 @@ rumors_per_day: 8
 surge_window_minutes: 30
 surge_max_same_rubric: 10
 regular_per_hour: 8
+# Не більше одного посту на сюжет у цьому вікні (хв). Гаряча тема з багатьох джерел
+# інакше спамить майже-дублями; спростування (refutation) — виняток, іде завжди.
+story_cooldown_minutes: 60

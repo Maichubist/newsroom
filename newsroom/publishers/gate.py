@@ -35,6 +35,9 @@ class Limits:
     rumors_per_day: int = 8
     surge_window_minutes: int = 30
     surge_max_same_rubric: int = 5
+    # at most one post per story within this window — a fast-breaking story with many
+    # sources/updates otherwise spams near-duplicate posts (refutations are exempt).
+    story_cooldown_minutes: int = 60
 
 
 def load_limits(path: str | Path) -> Limits:
@@ -48,6 +51,7 @@ def load_limits(path: str | Path) -> Limits:
             rumors_per_day=int(data.get("rumors_per_day", 8)),
             surge_window_minutes=int(data.get("surge_window_minutes", 30)),
             surge_max_same_rubric=int(data.get("surge_max_same_rubric", 5)),
+            story_cooldown_minutes=int(data.get("story_cooldown_minutes", 60)),
         )
     except (TypeError, ValueError) as exc:
         raise LimitsConfigError(f"bad limits value: {exc}") from exc
@@ -65,6 +69,8 @@ class GateInputs:
     urgent_last_hour: int = 0
     rumors_last_day: int = 0
     surge_same_rubric: int = 0
+    story_recent_posts: int = 0             # posts already out for this event's story in the cooldown window
+    is_refutation: bool = False             # a correction always goes out (exempt from the cooldown)
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,11 @@ def evaluate_gate(inputs: GateInputs, limits: Limits, *,
     # --- surge / possible attack (hold) ---
     if inputs.surge_same_rubric >= limits.surge_max_same_rubric:
         reasons.append("surge")
+
+    # --- one post per story per cooldown (hold) — a breaking story otherwise spams
+    #     near-duplicate posts; refutations/corrections are exempt ---
+    if inputs.story_recent_posts >= 1 and not inputs.is_refutation:
+        reasons.append("story_cooldown")
 
     return GateDecision(allow=not reasons, reasons=sorted(set(reasons)))
 
