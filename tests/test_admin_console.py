@@ -167,10 +167,30 @@ def test_all_canned_commands_run_without_error(pg_engine):
     from newsroom.db import make_session_factory
 
     console = AdminConsole(make_session_factory(pg_engine))
-    for cmd in ("/stats", "/pub", "/pub 3", "/demand", "/topics", "/topics 5", "/sources", "/top", "/top 5", "/media"):
+    for cmd in ("/stats", "/pub", "/pub 3", "/review", "/review 5", "/demand", "/topics", "/topics 5",
+                "/sources", "/top", "/top 5", "/media"):
         out = console.handle(cmd)
         assert isinstance(out, str) and out
         assert "помилка команди" not in out          # no dispatch crash
+
+
+@pytest.mark.pg
+def test_report_review_empty_then_lists_held(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Publication
+
+    sf = make_session_factory(pg_engine)
+    assert "Немає" in AdminConsole(sf).handle("/review")
+    with Session(pg_engine) as s:
+        pub = Publication(channel="telegram", kind="post", status="review",
+                          headline="Можливий дубль", body="b", features={"critic_ok": True})
+        s.add(pub)
+        s.flush()
+        s.add(Decision(entity_type="publication", entity_id=str(pub.id), stage="predup",
+                       decision="predup_hold_review", reason="llm_unavailable"))
+        s.commit()
+    out = AdminConsole(sf).handle("/review")
+    assert "розгляді" in out and "llm_unavailable" in out
 
 
 @pytest.mark.pg

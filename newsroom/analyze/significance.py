@@ -205,7 +205,9 @@ def score_pending(session_factory, config: SignificanceConfig, *, limit: int = 1
     with session_factory() as s:
         ids = list(s.execute(
             select(Event.id)
-            .where(Event.significance.is_(None), Event.status.in_(POSTABLE_STATUSES))
+            # a duplicate event (ingest/publish dedup) is never posted — don't score it
+            .where(Event.significance.is_(None), Event.status.in_(POSTABLE_STATUSES),
+                   Event.duplicate_of.is_(None))
             .order_by(Event.id)
             .limit(limit)
         ).scalars().all())

@@ -8,9 +8,13 @@ from newsroom.service import (
     factcheck_enabled,
     media_check_enabled,
     media_download_enabled,
+    ingest_dedup_enabled,
+    ingest_dedup_enforce,
     media_moderation_enabled,
     metrics_enabled,
     monitoring_enabled,
+    prepublish_dedup_enabled,
+    prepublish_dedup_enforce,
     reputation_enabled,
     story_updates_enabled,
     verify_enabled,
@@ -28,6 +32,10 @@ FLAGS = {
     "REPUTATION_ENABLED": reputation_enabled,
     "MONITORING_ENABLED": monitoring_enabled,
     "METRICS_ENABLED": metrics_enabled,
+    "PREPUBLISH_DEDUP_ENABLED": prepublish_dedup_enabled,
+    "PREPUBLISH_DEDUP_ENFORCE": prepublish_dedup_enforce,
+    "INGEST_DEDUP_ENABLED": ingest_dedup_enabled,
+    "INGEST_DEDUP_ENFORCE": ingest_dedup_enforce,
 }
 
 

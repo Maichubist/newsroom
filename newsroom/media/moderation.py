@@ -107,16 +107,14 @@ class OpenAIImageModerator:  # pragma: no cover - network / vision
 
     def _call(self, image_url: str) -> str | None:
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": self.prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ]}],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            return resp.choices[0].message.content
+            from newsroom.llmutil import chat_json
+
+            return chat_json(self._ensure_client(), model=self.model,
+                             messages=[{"role": "user", "content": [
+                                 {"type": "text", "text": self.prompt},
+                                 {"type": "image_url", "image_url": {"url": image_url}},
+                             ]}],
+                             op="moderate_image", max_tokens=512)
         except Exception as exc:  # noqa: BLE001
             log.warning("image moderation failed", extra={"error": str(exc)})
             return None

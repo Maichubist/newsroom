@@ -98,13 +98,12 @@ class LLMDedupGrouper:  # pragma: no cover - network
             return []
         content = fill_prompt(self.prompt, events=_render_events(events))
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": content}],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            return parse_groups(resp.choices[0].message.content, valid)
+            from newsroom.llmutil import chat_json
+
+            raw = chat_json(self._ensure_client(), model=self.model,
+                            messages=[{"role": "user", "content": content}],
+                            op="dedup", max_tokens=1024)
+            return parse_groups(raw, valid)
         except Exception as exc:  # noqa: BLE001
             log.warning("dedup group failed", extra={"error": str(exc)})
             return []           # conservative: no merges on failure

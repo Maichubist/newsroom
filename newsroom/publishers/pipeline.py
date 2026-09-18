@@ -60,12 +60,18 @@ def _render_send_body(pub) -> str:
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
-                 require_vision: bool = True, charter_version: str = "0.3"):
+                 require_vision: bool = True, charter_version: str = "0.3",
+                 predup=None, predup_enforce: bool = False):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
         self.limits = limits
         self.supervisor = supervisor
+        # publish-time twin check (Phase A dedup). None = off (default, existing behaviour).
+        # In observe mode (predup_enforce=False) the verdict is only LOGGED, never acted on,
+        # so the channel is untouched while thresholds are calibrated.
+        self.predup = predup
+        self.predup_enforce = bool(predup_enforce)
         # media_store lets the publisher read stored Telegram media to upload it;
         # purge_media_after_publish additionally deletes local files once a post is out.
         self.media_store = media_store
@@ -140,6 +146,31 @@ class Publisher:
             self._record_block(publication_id, decision.reasons)
             return PublishOutcome(publication_id, published=False, reasons=decision.reasons)
 
+        # publish-time twin check (Phase A dedup): after the gate allows and just before
+        # sending, ask whether we already drafted/published this same event. A released
+        # review draft carries a one-shot override so it is not re-arbitrated. A failure
+        # here must NOT stall publishing (the twin check is a backstop, not a hard floor —
+        # OPSEC/critic/stop live in the gate): log and publish rather than freeze the queue.
+        if self.predup is not None and not (pub.features or {}).get("predup_override"):
+            try:
+                verdict = self.predup.check(pub.event_id)
+                blocked = self._apply_predup(publication_id, verdict)
+                if blocked is not None:
+                    return blocked
+            except Exception as exc:  # noqa: BLE001
+                # publish rather than freeze the queue, but make the bypass VISIBLE — a
+                # silent enforce bypass would defeat the whole check.
+                log.exception("predup check failed; publishing without it",
+                              extra={"publication_id_": publication_id})
+                self._record_predup_error(publication_id, exc)
+
+        # Outbox claim (delivery state): atomically move draft -> publishing BEFORE sending,
+        # so a crash between the send and the "published" write is recoverable instead of
+        # silently re-sending. If the row is no longer a draft (claimed elsewhere / superseded),
+        # skip. FOR UPDATE serialises the claim across workers.
+        if not self._claim_for_send(publication_id):
+            return PublishOutcome(publication_id, skipped=True)
+
         # Prefer uploading the locally stored bytes over sending a URL: Telegram often
         # cannot fetch a source URL (telesco.pe / hotlink-protected images 400 with
         # "failed to get HTTP URL content"). If there is no file and no fetchable URL,
@@ -182,6 +213,10 @@ class Publisher:
                                         is_rumor=pub_is_rumor, message_id=result.message_id)
                 self._purge_media(pub.event_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
+            # definite send failure -> release the claim back to draft so it retries next tick
+            from newsroom.models import STATUS_DRAFT
+            if pub is not None:
+                pub.status = STATUS_DRAFT
             s.add(Decision(
                 entity_type="publication", entity_id=str(publication_id), stage="publish",
                 decision="publish_failed", reason=result.error, details={"error": result.error},
@@ -189,6 +224,61 @@ class Publisher:
             ))
             s.commit()
             return PublishOutcome(publication_id, published=False, reasons=["send_failed"])
+
+    def _claim_for_send(self, publication_id: int) -> bool:
+        """Atomically claim a draft for delivery: draft -> publishing under a row lock.
+        Returns False if it is no longer a draft (already claimed, superseded, held). The
+        'publishing' state is what makes a crash mid-send recoverable (reconcile at startup)."""
+        from sqlalchemy import select
+
+        from newsroom.models import STATUS_DRAFT, STATUS_PUBLISHING, Publication
+
+        with self.sf() as s:
+            pub = s.execute(
+                select(Publication).where(Publication.id == publication_id).with_for_update()
+            ).scalar_one_or_none()
+            if pub is None or pub.status != STATUS_DRAFT:
+                return False
+            pub.status = STATUS_PUBLISHING
+            s.commit()
+        return True
+
+    def reconcile_pending_deliveries(self) -> int:
+        """Recover posts stuck in 'publishing' (a crash between send and the published write):
+        their delivery is UNKNOWN, so we must neither auto-resend (double post) nor auto-drop
+        (lost post). Mark them 'ambiguous' and alert a human to confirm. Call once at startup,
+        before the publish loop begins. Returns how many were found."""
+        from sqlalchemy import select
+
+        from newsroom.models import (
+            STATUS_PUBLISH_AMBIGUOUS, STATUS_PUBLISHING, Decision, Publication,
+        )
+
+        stuck: list[tuple[int, str | None]] = []
+        with self.sf() as s:
+            rows = s.execute(
+                select(Publication).where(Publication.status == STATUS_PUBLISHING)
+            ).scalars().all()
+            for pub in rows:
+                pub.status = STATUS_PUBLISH_AMBIGUOUS
+                s.add(Decision(
+                    entity_type="publication", entity_id=str(pub.id), stage="publish",
+                    decision="publish_ambiguous", reason="crashed mid-send; delivery unknown",
+                    details={}, charter_version=self.charter_version,
+                ))
+                stuck.append((pub.id, pub.headline))
+            s.commit()
+        if stuck and self.supervisor is not None:
+            for pid, headline in stuck:
+                try:
+                    self.supervisor.notify(
+                        f"⚠️ Пост #{pid} завис у стані «publishing» (краш під час надсилання). "
+                        f"Доставку НЕ підтверджено — перевір канал вручну: «{(headline or '')[:80]}»")
+                except Exception:  # noqa: BLE001
+                    log.exception("ambiguous-delivery alert failed")
+        if stuck:
+            log.warning("reconciled stuck publishing rows", extra={"count": len(stuck)})
+        return len(stuck)
 
     def _media_choice(self, s, event_id):
         """Pick media to attach — only for an event whose media passed the §9.4 reuse
@@ -305,6 +395,109 @@ class Publisher:
             )
         except Exception:  # noqa: BLE001 - a failed notice must not fail the publish
             log.exception("supervisor notify failed")
+
+    def _apply_predup(self, publication_id: int, verdict) -> "PublishOutcome | None":
+        """Journal the twin verdict and, WHEN ENFORCING, act on it. Returns a
+        PublishOutcome when the post must NOT be sent (duplicate/update/hold_review),
+        or None to proceed (a clean 'separate', or observe mode where nothing is acted
+        on). In observe mode this only writes a Decision — no status/duplicate_of/story_id
+        change — so the channel is untouched while thresholds are calibrated."""
+        from newsroom.publishers.predup import (
+            ACTION_DUPLICATE, ACTION_HOLD_REVIEW, ACTION_SEPARATE, ACTION_UPDATE,
+        )
+        from newsroom.models import Decision, Event, Publication
+
+        enforce = self.predup_enforce
+        action = verdict.action
+        effective = action          # what we actually DID (an update with no story falls back to review)
+        details = {
+            "action": action, "mode": verdict.mode, "enforced": enforce,
+            "candidate_event_id": verdict.canonical_event_id,
+            "confidence": verdict.confidence, **(verdict.signals or {}),
+        }
+        with self.sf() as s:
+            if enforce and action != ACTION_SEPARATE:
+                pub = s.get(Publication, publication_id)
+                event = s.get(Event, pub.event_id) if pub and pub.event_id else None
+                if action == ACTION_DUPLICATE:
+                    if event is not None and verdict.canonical_event_id is not None:
+                        event.duplicate_of = verdict.canonical_event_id
+                    if pub is not None:
+                        pub.status = "superseded"
+                elif action == ACTION_UPDATE:
+                    # link the event to the canonical story and reset update_type so StoryUpdater
+                    # reclassifies it against the RIGHT story; close the primary draft (do NOT set
+                    # duplicate_of — it is not a duplicate, it is a story update).
+                    canon = s.get(Event, verdict.canonical_event_id) if verdict.canonical_event_id else None
+                    canon_story = canon.story_id if canon is not None else None
+                    if canon_story is not None:
+                        if event is not None:
+                            event.story_id = canon_story
+                            event.update_type = None
+                        if pub is not None:
+                            pub.status = "superseded"
+                    else:
+                        # the canonical has NO story yet, so StoryUpdater would never pick this
+                        # event up — superseding would silently drop it. Hold for a human instead.
+                        effective = ACTION_HOLD_REVIEW
+                        if pub is not None:
+                            pub.status = "review"
+                elif action == ACTION_HOLD_REVIEW:
+                    if pub is not None:
+                        pub.status = "review"        # exits the publish queue; a human decides
+            details["effective_action"] = effective
+            s.add(Decision(
+                entity_type="publication", entity_id=str(publication_id), stage="predup",
+                decision=f"predup_{action}", reason=verdict.reason or None, details=details,
+                model=verdict.model, charter_version=self.charter_version,
+            ))
+            s.commit()
+
+        if not enforce or action == ACTION_SEPARATE:
+            return None                       # observe, or clean -> proceed to send
+        if effective == ACTION_HOLD_REVIEW:
+            self._notify_review(publication_id, verdict)
+        return PublishOutcome(publication_id, published=False, reasons=[f"predup_{effective}"])
+
+    def _record_predup_error(self, publication_id: int, exc: Exception) -> None:
+        """Journal a predup failure and alert the supervisor. The post is still sent (the
+        queue must not freeze), but in ENFORCE mode that is a bypass, so it must not be
+        silent — the decision trace and the alert make it auditable."""
+        from newsroom.models import Decision
+
+        try:
+            with self.sf() as s:
+                s.add(Decision(
+                    entity_type="publication", entity_id=str(publication_id), stage="predup",
+                    decision="predup_error", reason=str(exc)[:300],
+                    details={"enforced": self.predup_enforce, "published_without_check": True},
+                    charter_version=self.charter_version,
+                ))
+                s.commit()
+        except Exception:  # noqa: BLE001 - logging the error must not itself break publishing
+            log.exception("failed to journal predup error")
+        if self.predup_enforce and self.supervisor is not None:
+            try:
+                self.supervisor.notify(
+                    f"⚠️ Дедуп-перевірка впала — пост #{publication_id} опубліковано БЕЗ перевірки "
+                    f"(enforce). Причина: {str(exc)[:200]}")
+            except Exception:  # noqa: BLE001
+                log.exception("predup error alert failed")
+
+    def _notify_review(self, publication_id: int, verdict) -> None:
+        if self.supervisor is None:
+            return
+        try:
+            headline = None
+            with self.sf() as s:
+                from newsroom.models import Publication
+
+                pub = s.get(Publication, publication_id)
+                headline = pub.headline if pub else None
+            self.supervisor.notify_review(headline=headline, publication_id=publication_id,
+                                          reason=verdict.reason or "можливий дубль")
+        except Exception:  # noqa: BLE001 - a failed notice must not fail anything
+            log.exception("review notice failed")
 
     def _record_block(self, publication_id: int, reasons: list[str]) -> None:
         """Journal a block, but only when it is new or the reasons changed —

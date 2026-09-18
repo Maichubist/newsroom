@@ -17,6 +17,27 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from newsroom.db.base import Base
 
+# publication.status — single source of truth (a raw-string typo would otherwise hide a
+# post from the queue forever). Kept as a plain column (not a DB enum) so new states are
+# additive-migration-free; validate against PUBLICATION_STATUSES at the write sites.
+STATUS_DRAFT = "draft"
+STATUS_PUBLISHED = "published"
+STATUS_EDITED = "edited"
+STATUS_RETRACTED = "retracted"
+STATUS_DELETED = "deleted"
+STATUS_REVIEW = "review"              # held by publish-time dedup for a human decision
+STATUS_SUPERSEDED = "superseded"     # a duplicate / folded-update draft that never publishes
+STATUS_PUBLISHING = "publishing"     # claimed for delivery (outbox); reconciled after a crash
+STATUS_PUBLISH_AMBIGUOUS = "ambiguous"   # crashed mid-send — a human must confirm delivery (fits varchar(16))
+PUBLICATION_STATUSES = frozenset({
+    STATUS_DRAFT, STATUS_PUBLISHED, STATUS_EDITED, STATUS_RETRACTED, STATUS_DELETED,
+    STATUS_REVIEW, STATUS_SUPERSEDED, STATUS_PUBLISHING, STATUS_PUBLISH_AMBIGUOUS,
+})
+
+
+def is_valid_publication_status(status: str) -> bool:
+    return status in PUBLICATION_STATUSES
+
 
 class Publication(Base):
     __tablename__ = "publications"
@@ -32,7 +53,9 @@ class Publication(Base):
     headline: Mapped[str | None] = mapped_column(Text, nullable=True)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft|published|edited|retracted|deleted
+    # one of PUBLICATION_STATUSES (see module top). String, not a DB enum, so new states
+    # need no migration; the app validates on write (is_valid_publication_status).
+    status: Mapped[str] = mapped_column(String(16), default=STATUS_DRAFT)
 
     charter_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)

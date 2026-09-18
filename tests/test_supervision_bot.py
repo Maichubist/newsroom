@@ -24,6 +24,12 @@ def test_parse_callback_variants():
     assert parse_callback(None).kind == "unknown"
 
 
+def test_parse_callback_review_variants():
+    assert parse_callback("review_publish:7") == CallbackAction("review_publish", publication_id=7)
+    assert parse_callback("review_drop:7") == CallbackAction("review_drop", publication_id=7)
+    assert parse_callback("review_drop:x").kind == "unknown"
+
+
 # --- bot actions (pg) ---------------------------------------------------------
 
 class RecordingTelegram:
@@ -108,16 +114,104 @@ def test_stop_and_resume_flip_system_state(pg_engine):
         assert is_publishing_stopped(s) is False
 
 
+def _review_pub(pg_engine):
+    from newsroom.models import Publication
+
+    with Session(pg_engine) as s:
+        pub = Publication(channel="telegram", kind="post", status="review", headline="h", body="b",
+                          features={"critic_ok": True})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+        return pid
+
+
 @pytest.mark.pg
-def test_handle_update_answers_callback(pg_engine):
+def test_review_release_returns_to_draft_with_override(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Publication
+
+    sf = make_session_factory(pg_engine)
+    bot = SupervisionBot(sf, RecordingTelegram())
+    pid = _review_pub(pg_engine)
+
+    result = bot.handle(parse_callback(f"review_publish:{pid}"))
+    assert "чергу" in result
+    with Session(pg_engine) as s:
+        pub = s.get(Publication, pid)
+        assert pub.status == "draft" and pub.features["predup_override"] is True
+        dec = s.execute(select(Decision).where(
+            Decision.entity_id == str(pid), Decision.decision == "review_released")).scalars().one()
+        assert dec.stage == "predup"
+
+
+@pytest.mark.pg
+def test_review_drop_supersedes(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    sf = make_session_factory(pg_engine)
+    bot = SupervisionBot(sf, RecordingTelegram())
+    pid = _review_pub(pg_engine)
+
+    assert "відхилено" in bot.handle(parse_callback(f"review_drop:{pid}")).lower()
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "superseded"
+
+
+@pytest.mark.pg
+def test_review_action_on_non_review_pub(pg_engine):
+    from newsroom.db import make_session_factory
+
+    sf = make_session_factory(pg_engine)
+    bot = SupervisionBot(sf, RecordingTelegram())
+    published = _published_pub(pg_engine, status="published")
+    assert "Не на розгляді" in bot.handle(parse_callback(f"review_publish:{published}"))
+
+
+@pytest.mark.pg
+def test_handle_update_answers_authorized_callback(pg_engine):
     from newsroom.db import make_session_factory
 
     sf = make_session_factory(pg_engine)
     tg = RecordingTelegram()
-    bot = SupervisionBot(sf, tg)
+    bot = SupervisionBot(sf, tg, admin_chat_id=404)
 
-    handled = bot.handle_update({"callback_query": {"id": "cq1", "data": "stop"}})
+    update = {"callback_query": {"id": "cq1", "data": "stop", "message": {"chat": {"id": 404}}}}
+    handled = bot.handle_update(update)
     assert handled is True and tg.answers == [("cq1", "Публікацію зупинено")]
 
     # a non-callback update is ignored
     assert bot.handle_update({"message": {"text": "hi"}}) is False
+
+
+@pytest.mark.pg
+def test_handle_update_rejects_unauthorized_callback(pg_engine):
+    # a callback from any chat other than the admin's must NOT drive controls (auth fix)
+    from newsroom.db import make_session_factory
+
+    sf = make_session_factory(pg_engine)
+    tg = RecordingTelegram()
+    bot = SupervisionBot(sf, tg, admin_chat_id=404)
+
+    update = {"callback_query": {"id": "cqX", "data": "stop", "message": {"chat": {"id": 999}}}}
+    assert bot.handle_update(update) is True                 # handled (answered) ...
+    assert tg.answers == [("cqX", "Немає доступу")]          # ... but refused
+    with Session(pg_engine) as s:
+        assert is_publishing_stopped(s) is False             # the stop action never ran
+
+
+def test_callback_unauthorized_without_admin_configured():
+    # no admin chat configured -> every callback is refused (offline)
+    bot = SupervisionBot(None, RecordingTelegram())
+    assert bot._callback_is_authorized({"message": {"chat": {"id": 1}}}) is False
+
+
+def test_callback_user_id_gate():
+    # when admin_user_id is set, the pressing user must match too (offline)
+    bot = SupervisionBot(None, RecordingTelegram(), admin_chat_id=404, admin_user_id=7)
+    ok = {"message": {"chat": {"id": 404}}, "from": {"id": 7}}
+    wrong_user = {"message": {"chat": {"id": 404}}, "from": {"id": 8}}
+    assert bot._callback_is_authorized(ok) is True
+    assert bot._callback_is_authorized(wrong_user) is False

@@ -68,6 +68,13 @@ class Supervisor:
                                      is_rumor=is_rumor, channel_ref=channel_ref)
         return self.notify(text, reply_markup=supervision_keyboard(publication_id))
 
+    def notify_review(self, *, headline: str | None, publication_id: int | None,
+                      reason: str | None = None) -> bool:
+        """A publish-time dedup check couldn't decide (LLM unavailable) and held the
+        draft as a possible duplicate. Ask a human: publish anyway, or drop it."""
+        text = format_review_notice(headline=headline, reason=reason)
+        return self.notify(text, reply_markup=review_keyboard(publication_id))
+
 
 def supervision_keyboard(publication_id: int | None) -> dict:
     """Inline keyboard for a publication notice: recall this post, or halt all
@@ -77,3 +84,20 @@ def supervision_keyboard(publication_id: int | None) -> dict:
         buttons.append({"text": "↩︎ Відкликати", "callback_data": f"retract:{publication_id}"})
     buttons.append({"text": "⏸ Стоп", "callback_data": "stop"})
     return {"inline_keyboard": [buttons]}
+
+
+def format_review_notice(*, headline: str | None, reason: str | None = None) -> str:
+    head = (headline or "").strip() or "(без заголовка)"
+    why = f"\nПричина: {reason}" if reason else ""
+    return (f"🕵 Притримано як можливий дубль (потрібне рішення){why}\n{head}\n\n"
+            f"«Опублікувати» — надіслати попри це; «Відхилити» — прибрати чернетку.")
+
+
+def review_keyboard(publication_id: int | None) -> dict:
+    """Inline keyboard for a held-for-review draft: publish anyway, or drop it."""
+    if publication_id is None:
+        return {"inline_keyboard": [[{"text": "⏸ Стоп", "callback_data": "stop"}]]}
+    return {"inline_keyboard": [[
+        {"text": "✅ Опублікувати", "callback_data": f"review_publish:{publication_id}"},
+        {"text": "🗑 Відхилити", "callback_data": f"review_drop:{publication_id}"},
+    ]]}

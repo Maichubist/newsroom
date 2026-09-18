@@ -155,13 +155,11 @@ class LLMUpdateClassifier:  # pragma: no cover - network
         content = fill_prompt(self.prompt, summary=(current_summary or "(немає)"),
                               event=event_view or "(без опису)")
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": content}],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            return resp.choices[0].message.content
+            from newsroom.llmutil import chat_json
+
+            return chat_json(self._ensure_client(), model=self.model,
+                             messages=[{"role": "user", "content": content}],
+                             op="story_update", max_tokens=512)
         except Exception as exc:  # noqa: BLE001
             log.warning("update classification failed", extra={"error": str(exc)})
             return None
@@ -246,27 +244,37 @@ class StoryUpdater:
 
 def classify_pending(session_factory, updater: "StoryUpdater", *, limit: int = 25,
                      significance_threshold: float | None = None,
-                     classify_grace_seconds: float = 180.0) -> dict[str, int]:
+                     classify_grace_seconds: float = 180.0,
+                     require_dedup_settled: bool = False,
+                     dedup_grace_seconds: float = 300.0) -> dict[str, int]:
     """One story-update tick: classify publishable events linked to a story that
     have no update_type yet. Returns counts, including how many warrant a post. When
     a significance threshold is given, low-significance events are skipped — they are
-    not drafted anyway, so their update_type costs a call for nothing."""
+    not drafted anyway, so their update_type costs a call for nothing. With
+    require_dedup_settled, an event waits for the ingest-dedup verdict first."""
     import datetime as dt
 
     from sqlalchemy import select
 
+    from newsroom.analyze.ingest_dedup import dedup_settled_clause
     from newsroom.analyze.significance import significance_ready_clause
     from newsroom.models import Event
 
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=classify_grace_seconds)
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(seconds=classify_grace_seconds)
     conditions = [
         Event.status.in_(("reported", "confirmed", "rumor")),
         Event.story_id.is_not(None),
         Event.update_type.is_(None),
+        Event.duplicate_of.is_(None),        # a merged duplicate is inert — don't classify it
     ]
     clause = significance_ready_clause(significance_threshold, cutoff)
     if clause is not None:
         conditions.append(clause)
+    dedup_clause = dedup_settled_clause(require_dedup_settled,
+                                        now - dt.timedelta(seconds=dedup_grace_seconds))
+    if dedup_clause is not None:
+        conditions.append(dedup_clause)
 
     with session_factory() as s:
         ids = list(s.execute(

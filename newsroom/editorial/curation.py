@@ -193,13 +193,12 @@ class LLMEditorialRanker:  # pragma: no cover - network
             return {}
         content = fill_prompt(self.prompt, candidates=_render_candidates(candidates))
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": content}],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            return parse_ranking(resp.choices[0].message.content, valid)
+            from newsroom.llmutil import chat_json
+
+            raw = chat_json(self._ensure_client(), model=self.model,
+                            messages=[{"role": "user", "content": content}],
+                            op="curate", max_tokens=2048)
+            return parse_ranking(raw, valid)
         except Exception as exc:  # noqa: BLE001
             log.warning("curation rank failed", extra={"error": str(exc)})
             # conservative: hold all rather than publishing unreviewed on an error
@@ -215,14 +214,17 @@ def _facts_brief(fact_base, *, limit: int = 3) -> list[str]:
 
 
 def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_threshold: float | None = None,
-                   window_hours: int = 6, limit: int = 40) -> dict[str, int]:
+                   window_hours: int = 6, limit: int = 40, require_dedup_settled: bool = False,
+                   dedup_grace_seconds: float = 300.0) -> dict[str, int]:
     """One curation tick: mark recent significant, not-yet-curated events publish/hold.
     must-publish events are marked deterministically; the rest are ranked comparatively
-    by the LLM. Only publish-marked events are later drafted."""
+    by the LLM. Only publish-marked events are later drafted. With require_dedup_settled,
+    an event waits for the ingest-dedup verdict first (Phase B savings)."""
     import datetime as dt
 
     from sqlalchemy import select
 
+    from newsroom.analyze.ingest_dedup import dedup_settled_clause
     from newsroom.models import Decision, Event
 
     now = dt.datetime.now(dt.timezone.utc)
@@ -236,6 +238,10 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
     ]
     if significance_threshold is not None:
         conditions.append(Event.significance >= significance_threshold)
+    dedup_clause = dedup_settled_clause(require_dedup_settled,
+                                        now - dt.timedelta(seconds=dedup_grace_seconds))
+    if dedup_clause is not None:
+        conditions.append(dedup_clause)
 
     from newsroom.analyze.demand import load_demand
     from newsroom.analyze.taxonomy import load_event_heat

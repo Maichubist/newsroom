@@ -131,13 +131,11 @@ class LLMVerdictJudge:  # pragma: no cover - network
         evidence_block = "\n".join(f"[{i}] {snip}" for i, snip in enumerate(evidence_snippets)) or "(немає)"
         content = fill_prompt(self.prompt, claim=claim_text, evidence=evidence_block)
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": content}],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            return resp.choices[0].message.content
+            from newsroom.llmutil import chat_json
+
+            return chat_json(self._ensure_client(), model=self.model,
+                             messages=[{"role": "user", "content": content}],
+                             op="factcheck_verdict", max_tokens=512)
         except Exception as exc:  # noqa: BLE001
             log.warning("verdict call failed", extra={"error": str(exc)})
             return None

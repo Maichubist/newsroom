@@ -112,13 +112,12 @@ class LLMGenerator:  # pragma: no cover - network
     def _call(self, material: str, feedback: str | None) -> str | None:
         fb = f"Врахуй зауваження критика і перепиши: {feedback}\n" if feedback else ""
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
+            from newsroom.llmutil import chat_json
+
+            return chat_json(
+                self._ensure_client(), model=self.model,
                 messages=[{"role": "user", "content": fill_prompt(self.prompt, feedback=fb, material=material)}],
-                response_format={"type": "json_object"},
-                temperature=0.4,
-            )
-            return resp.choices[0].message.content
+                op="generate", max_tokens=2048, temperature=0.4)
         except Exception as exc:  # noqa: BLE001
             log.warning("generator call failed", extra={"error": str(exc)})
             return None

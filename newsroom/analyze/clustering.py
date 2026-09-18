@@ -76,6 +76,7 @@ class EventClusterer:
                 select(Event).where(
                     Event.centroid.is_not(None),
                     Event.updated_at >= cutoff,
+                    Event.duplicate_of.is_(None),   # a merged duplicate is inert — never a cluster target
                 )
             ).scalars().all())
 

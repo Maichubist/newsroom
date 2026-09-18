@@ -766,6 +766,291 @@ def test_story_second_post_replies_to_first(pg_engine):
         assert s.get(Publication, second_id).reply_to_publication_id == first_id
 
 
+# --- publish-time dedup (Phase A) --------------------------------------------
+
+from newsroom.publishers.predup import PredupConfig, PrepublishDedup, TwinJudgment
+
+
+class _FakeJudge:
+    model = "fake-judge"
+
+    def __init__(self, decision):
+        self.decision = decision
+        self.calls = 0
+
+    def judge(self, pair):
+        self.calls += 1
+        return TwinJudgment(decision=self.decision, confidence=0.9, reason="fake")
+
+
+_twin_tag = {"n": 0}
+
+
+def _seed_twin_case(pg_engine, *, exact, with_story=False):
+    """Seed a canonical PUBLISHED event and an INCOMING draft that is its twin.
+    exact=True -> same content_hash (auto-duplicate); exact=False -> near SimHash (grey)."""
+    from newsroom.models import Event, EventItem, Item, Publication, Source, Story
+
+    _twin_tag["n"] += 1
+    tag = _twin_tag["n"]
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url=f"https://tw/{tag}", name="TW", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        story_id = None
+        if with_story:
+            story = Story(slug=f"tw-{tag}", title="Сюжет", state="developing",
+                         last_event_at=dt.datetime.now(UTC))
+            s.add(story)
+            s.flush()
+            story_id = story.id
+
+        canon_hash = f"canon{tag}".ljust(64, "0")
+        canon_item = Item(source_id=src.id, external_id=f"c{tag}", content_hash=canon_hash,
+                          simhash=0, title="Наступ на півночі")
+        s.add(canon_item)
+        s.flush()
+        canon = Event(status="confirmed", risk_level="low", rubric="war", title="Наступ на півночі",
+                      story_id=story_id, first_seen_at=dt.datetime.now(UTC))
+        s.add(canon)
+        s.flush()
+        s.add(EventItem(event_id=canon.id, item_id=canon_item.id, role="origin"))
+        s.add(Publication(event_id=canon.id, channel="telegram", kind="post", status="published",
+                          headline="Наступ на півночі", body="Опубліковано.",
+                          published_at=dt.datetime.now(UTC), features={"critic_ok": True}))
+
+        inc_hash = canon_hash if exact else f"inc{tag}".ljust(64, "0")
+        inc_sim = 0 if exact else 1                # near-identical SimHash -> grey
+        inc_item = Item(source_id=src.id, external_id=f"i{tag}", content_hash=inc_hash,
+                        simhash=inc_sim, title="Сили оборони почали наступ")
+        s.add(inc_item)
+        s.flush()
+        incoming = Event(status="confirmed", risk_level="low", rubric="war",
+                         title="Сили оборони почали наступ", first_seen_at=dt.datetime.now(UTC))
+        s.add(incoming)
+        s.flush()
+        s.add(EventItem(event_id=incoming.id, item_id=inc_item.id, role="origin"))
+        pub = Publication(event_id=incoming.id, channel="telegram", kind="post", status="draft",
+                          headline="Сили оборони почали наступ", body="Спокійна новина з деталями.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        s.commit()
+        return canon.id, story_id, incoming.id, pub.id
+
+
+def _publisher_predup(sf, poster, *, judge=None, enforce, supervisor=None):
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    predup = PrepublishDedup(sf, judge=judge, config=PredupConfig())
+    return Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, supervisor=supervisor,
+                     predup=predup, predup_enforce=enforce)
+
+
+def test_predup_observe_logs_but_still_publishes(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    _canon, _st, inc_ev, pid = _seed_twin_case(pg_engine, exact=True)
+
+    outcome = _publisher_predup(sf, poster, enforce=False).publish_one(pid)
+    assert outcome.published is True                       # observe never blocks
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "published"
+        assert s.get(Event, inc_ev).duplicate_of is None  # observe changes NO state
+        dec = s.execute(select(Decision).where(
+            Decision.entity_id == str(pid), Decision.stage == "predup")).scalars().one()
+        assert dec.decision == "predup_duplicate" and dec.details["enforced"] is False
+
+
+def test_predup_enforce_duplicate_supersedes_and_marks(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    canon, _st, inc_ev, pid = _seed_twin_case(pg_engine, exact=True)
+
+    outcome = _publisher_predup(sf, poster, enforce=True).publish_one(pid)
+    assert outcome.published is False and "predup_duplicate" in outcome.reasons
+    assert poster.calls == []                              # never sent
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "superseded"
+        assert s.get(Event, inc_ev).duplicate_of == canon
+
+
+def test_predup_enforce_update_links_story_and_closes_draft(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    canon, story_id, inc_ev, pid = _seed_twin_case(pg_engine, exact=False, with_story=True)
+    judge = _FakeJudge("update")
+
+    outcome = _publisher_predup(sf, poster, judge=judge, enforce=True).publish_one(pid)
+    assert outcome.published is False and "predup_update" in outcome.reasons
+    assert judge.calls == 1 and poster.calls == []
+    with Session(pg_engine) as s:
+        ev = s.get(Event, inc_ev)
+        assert ev.story_id == story_id          # linked to the canonical story
+        assert ev.update_type is None           # reset so StoryUpdater reclassifies
+        assert ev.duplicate_of is None          # an update is NOT a duplicate
+        assert s.get(Publication, pid).status == "superseded"
+
+
+def test_predup_enforce_hold_review_and_notifies(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+    from newsroom.publishers.supervision import Supervisor
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    supervisor = Supervisor(tg, admin_chat_id=777)
+    _canon, _st, _inc, pid = _seed_twin_case(pg_engine, exact=False)
+    judge = _FakeJudge("hold_review")
+
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, supervisor=supervisor,
+                          predup=PrepublishDedup(sf, judge=judge, config=PredupConfig()),
+                          predup_enforce=True)
+    outcome = publisher.publish_one(pid)
+    assert outcome.published is False and "predup_hold_review" in outcome.reasons
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "review"
+    admin_calls = [p for _, p in poster.calls if p["chat_id"] == 777]
+    assert len(admin_calls) == 1 and "дубл" in admin_calls[0]["text"].lower()
+
+
+def test_predup_update_without_canonical_story_holds_for_review(pg_engine):
+    # an "update" verdict is only safe to link when the canonical event already has a story;
+    # with no story, superseding would orphan the event -> hold for review instead.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    _canon, story_id, inc_ev, pid = _seed_twin_case(pg_engine, exact=False, with_story=False)
+    assert story_id is None
+    judge = _FakeJudge("update")
+
+    outcome = _publisher_predup(sf, poster, judge=judge, enforce=True).publish_one(pid)
+    assert outcome.published is False and "predup_hold_review" in outcome.reasons
+    with Session(pg_engine) as s:
+        pub = s.get(Publication, pid)
+        assert pub.status == "review"                 # held, not superseded -> not orphaned
+        ev = s.get(Event, inc_ev)
+        assert ev.duplicate_of is None and ev.story_id is None
+
+
+class _RaisingPredup:
+    def check(self, event_id):
+        raise RuntimeError("boom")
+
+
+def test_predup_error_publishes_and_journals_bypass(pg_engine):
+    # a dedup-check failure must not freeze the queue, but the bypass must be VISIBLE:
+    # the post goes out AND a predup_error decision is journalled.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Publication
+    from newsroom.publishers.supervision import Supervisor
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    supervisor = Supervisor(tg, admin_chat_id=777)
+    _ev, pid = _draft(pg_engine)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS, supervisor=supervisor,
+                          predup=_RaisingPredup(), predup_enforce=True)
+
+    outcome = publisher.publish_one(pid)
+    assert outcome.published is True                   # channel not frozen
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "published"
+        dec = s.execute(select(Decision).where(
+            Decision.entity_id == str(pid), Decision.decision == "predup_error")).scalars().one()
+        assert dec.details["published_without_check"] is True
+    # enforce bypass alerts the admin
+    admin_calls = [p for _, p in poster.calls if p["chat_id"] == 777]
+    assert any("Дедуп" in c["text"] for c in admin_calls)
+
+
+def test_predup_separate_publishes_normally(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    _canon, _st, _inc, pid = _seed_twin_case(pg_engine, exact=False)
+    judge = _FakeJudge("separate")
+
+    outcome = _publisher_predup(sf, poster, judge=judge, enforce=True).publish_one(pid)
+    assert outcome.published is True and judge.calls == 1
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "published"
+
+
+def test_predup_override_skips_check(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    _canon, _st, _inc, pid = _seed_twin_case(pg_engine, exact=True)
+    with Session(pg_engine) as s:                          # released-from-review one-shot override
+        pub = s.get(Publication, pid)
+        pub.features = {**(pub.features or {}), "predup_override": True}
+        s.commit()
+
+    judge = _FakeJudge("duplicate")
+    outcome = _publisher_predup(sf, poster, judge=judge, enforce=True).publish_one(pid)
+    assert outcome.published is True and judge.calls == 0  # twin check skipped entirely
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "published"
+
+
+# --- outbox / delivery state (double-delivery protection) ---------------------
+
+def test_claim_for_send_and_reconcile_ambiguous(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    sf = make_session_factory(pg_engine)
+    _ev, pid = _draft(pg_engine)
+    pub = _publisher(sf, RecordingPoster())
+
+    assert pub._claim_for_send(pid) is True             # draft -> publishing
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "publishing"
+    assert pub._claim_for_send(pid) is False            # already claimed -> no second claim
+
+    # a row stuck in 'publishing' (crash mid-send) is reconciled to 'ambiguous', not resent
+    assert pub.reconcile_pending_deliveries() == 1
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "ambiguous"
+
+
+def test_send_failure_releases_claim_back_to_draft(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    class FailPoster:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, method, payload):
+            self.calls.append((method, payload))
+            return {"ok": False, "description": "boom"}
+
+    sf = make_session_factory(pg_engine)
+    _ev, pid = _draft(pg_engine)
+    outcome = _publisher(sf, FailPoster()).publish_one(pid)
+    assert outcome.published is False and "send_failed" in outcome.reasons
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "draft"    # claim released for retry, not stuck
+
+
 def test_block_decision_not_duplicated_on_repeat(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Decision

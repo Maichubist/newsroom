@@ -314,22 +314,28 @@ class Verifier:
 
 
 def verify_pending(session_factory, verifier: Verifier, *, limit: int = 50) -> dict[str, int]:
-    """One verification tick: take a batch of `new` items and run each through the
-    verifier. Uses SELECT … FOR UPDATE SKIP LOCKED so parallel workers don't grab
-    the same rows (architecture §4). verify_item moves each item off `new`, so the
-    next tick sees fresh items."""
+    """One verification tick: atomically CLAIM a batch of `new` items (new -> processing in
+    the same transaction as the FOR UPDATE SKIP LOCKED lock) and run each through the
+    verifier. Claiming in-tx is what actually stops two workers grabbing the same item — a
+    plain FOR UPDATE releases the lock when the select tx ends, before verify_item runs, so
+    the row would still be `new` for the next worker. verify_item moves each item to a
+    terminal status; a crash leaves it `processing`, recovered by reset_stuck_processing()."""
     from sqlalchemy import select
 
     from newsroom.models import Item
 
     with session_factory() as s:
-        ids = list(s.execute(
-            select(Item.id)
+        items = list(s.execute(
+            select(Item)
             .where(Item.status == "new")
             .order_by(Item.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         ).scalars().all())
+        ids = [it.id for it in items]
+        for it in items:
+            it.status = "processing"          # atomic claim, same tx as the lock
+        s.commit()
 
     stats: dict[str, int] = {"processed": 0, "errors": 0}
     for item_id in ids:
@@ -345,8 +351,9 @@ def verify_pending(session_factory, verifier: Verifier, *, limit: int = 50) -> d
 
 
 def _mark_item_error(session_factory, item_id: int) -> None:
-    """Move a poison item off `new` so it is not retried forever. It can be reset
-    to `new` for replay once the cause is fixed (architecture §3, replay)."""
+    """Move a poison item off the queue so it is not retried forever. It can be reset
+    to `new` for replay once the cause is fixed (architecture §3, replay). Handles both
+    `new` and the `processing` claim (a terminal status set mid-verify is left alone)."""
     import logging
 
     from newsroom.models import Item
@@ -356,11 +363,25 @@ def _mark_item_error(session_factory, item_id: int) -> None:
     try:
         with session_factory() as s:
             item = s.get(Item, item_id)
-            if item is not None and item.status == "new":
+            if item is not None and item.status in ("new", "processing"):
                 item.status = "error"
                 s.commit()
     except Exception:  # noqa: BLE001 - never let the error handler itself break the tick
         logging.getLogger("newsroom.analyze.verify").exception("could not mark item error")
+
+
+def reset_stuck_processing(session_factory) -> int:
+    """Recover items left `processing` by a crash mid-verify: reset them to `new` so the
+    next tick reprocesses them. Call once at startup, before the verify loop. Returns how
+    many were reset. (verify is a fresh recompute, so reprocessing is safe.)"""
+    from sqlalchemy import update
+
+    from newsroom.models import Item
+
+    with session_factory() as s:
+        result = s.execute(update(Item).where(Item.status == "processing").values(status="new"))
+        s.commit()
+        return int(result.rowcount or 0)
 
 
 def _derive_event_title(rows, *, max_len: int = 200) -> str | None:

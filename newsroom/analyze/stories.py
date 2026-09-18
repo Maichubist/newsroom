@@ -123,7 +123,9 @@ def link_pending(session_factory, linker: "StoryLinker", *, limit: int = 50) -> 
     with session_factory() as s:
         ids = list(s.execute(
             select(Event.id)
-            .where(Event.story_id.is_(None), Event.centroid.is_not(None))
+            # a merged duplicate (ingest dedup) is inert — don't link it to a story
+            .where(Event.story_id.is_(None), Event.centroid.is_not(None),
+                   Event.duplicate_of.is_(None))
             .order_by(Event.id)
             .limit(limit)
         ).scalars().all())

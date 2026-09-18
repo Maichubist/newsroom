@@ -115,7 +115,9 @@ CHECKABLE_STATUSES = ("reported", "confirmed", "rumor")
 def check_pending(session_factory, checker: "FactChecker", *, limit: int = 25,
                   significance_threshold: float | None = None,
                   classify_grace_seconds: float = 180.0,
-                  risk_levels: tuple[str, ...] | None = None) -> dict[str, int]:
+                  risk_levels: tuple[str, ...] | None = None,
+                  require_dedup_settled: bool = False,
+                  dedup_grace_seconds: float = 300.0) -> dict[str, int]:
     """One fact-check tick: check publishable events that have no claims yet.
     Once checked, the event has claims and is skipped next tick. When a significance
     threshold is given, low-significance events are skipped — fact-checking (claims +
@@ -127,15 +129,23 @@ def check_pending(session_factory, checker: "FactChecker", *, limit: int = 25,
 
     from sqlalchemy import or_, select
 
+    from newsroom.analyze.ingest_dedup import dedup_settled_clause
     from newsroom.analyze.significance import significance_ready_clause
     from newsroom.models import Claim, Event
 
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=classify_grace_seconds)
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(seconds=classify_grace_seconds)
     have_claims = select(Claim.event_id).distinct()
-    conditions = [Event.status.in_(CHECKABLE_STATUSES), Event.id.not_in(have_claims)]
+    # a duplicate event (ingest/publish dedup) is never posted — don't fact-check it
+    conditions = [Event.status.in_(CHECKABLE_STATUSES), Event.id.not_in(have_claims),
+                  Event.duplicate_of.is_(None)]
     clause = significance_ready_clause(significance_threshold, cutoff)
     if clause is not None:
         conditions.append(clause)
+    dedup_clause = dedup_settled_clause(require_dedup_settled,
+                                        now - dt.timedelta(seconds=dedup_grace_seconds))
+    if dedup_clause is not None:
+        conditions.append(dedup_clause)
     if risk_levels:
         # unknown risk (NULL) is checked too — when the level is uncertain, treat it
         # as check-worthy (asymmetry of errors, §3.5)

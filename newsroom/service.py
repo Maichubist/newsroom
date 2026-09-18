@@ -116,6 +116,22 @@ def metrics_enabled() -> bool:
     return os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def prepublish_dedup_enabled() -> bool:
+    return os.getenv("PREPUBLISH_DEDUP_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def prepublish_dedup_enforce() -> bool:
+    return os.getenv("PREPUBLISH_DEDUP_ENFORCE", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def ingest_dedup_enabled() -> bool:
+    return os.getenv("INGEST_DEDUP_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def ingest_dedup_enforce() -> bool:
+    return os.getenv("INGEST_DEDUP_ENFORCE", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -205,16 +221,19 @@ def build_factbase_builder_from_env(session_factory):  # pragma: no cover — ne
 
 async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30.0,
                            significance_threshold: float | None = None,
+                           require_dedup_settled: bool = False,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Build the shared fact base for publishable events until stopped. Runs
     before fact-check and editorial so both work from one viewpoint. Skips
-    low-significance events when a threshold is set. Nothing published."""
+    low-significance events when a threshold is set. When require_dedup_settled,
+    waits for the ingest-dedup verdict so a duplicate is merged first. Nothing published."""
     from newsroom.factbase import build_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(build_pending, session_factory, builder,
-                                            significance_threshold=significance_threshold)
+                                            significance_threshold=significance_threshold,
+                                            require_dedup_settled=require_dedup_settled)
             if stats.get("events"):
                 log.info("factbase tick", extra=bind(**stats))
         except Exception:
@@ -252,19 +271,21 @@ def build_factchecker_from_env(session_factory):  # pragma: no cover — needs O
 async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 30.0,
                             significance_threshold: float | None = None,
                             risk_levels: tuple[str, ...] | None = None,
+                            require_dedup_settled: bool = False,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Fact-check publishable events (claims -> evidence -> verdict) until stopped.
     Runs before editorial so drafts can build on verified claims. Skips
     low-significance events when a threshold is set (biggest token saving); with
-    `risk_levels` set, only checks those risk levels (FACTCHECK_HIGH_ONLY).
-    Nothing published."""
+    `risk_levels` set, only checks those risk levels (FACTCHECK_HIGH_ONLY). When
+    require_dedup_settled, waits for the ingest-dedup verdict first. Nothing published."""
     from newsroom.factcheck import check_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(check_pending, session_factory, checker,
                                             significance_threshold=significance_threshold,
-                                            risk_levels=risk_levels)
+                                            risk_levels=risk_levels,
+                                            require_dedup_settled=require_dedup_settled)
             if stats.get("events"):
                 log.info("factcheck tick", extra=bind(**stats))
         except Exception:
@@ -313,16 +334,19 @@ def build_story_updater_from_env(session_factory):  # pragma: no cover — needs
 
 async def story_updates_forever(session_factory, updater, *, tick_seconds: float = 30.0,
                                 significance_threshold: float | None = None,
+                                require_dedup_settled: bool = False,
                                 stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Classify how each new event moves its story (update_type) and update the
     running summary, before editorial drafts posts. Skips low-significance events
-    when a threshold is set. Nothing is published."""
+    when a threshold is set. When require_dedup_settled, waits for the ingest-dedup
+    verdict first. Nothing is published."""
     from newsroom.editorial import classify_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(classify_pending, session_factory, updater,
-                                            significance_threshold=significance_threshold)
+                                            significance_threshold=significance_threshold,
+                                            require_dedup_settled=require_dedup_settled)
             if stats.get("classified"):
                 log.info("story-update tick", extra=bind(**stats))
         except Exception:
@@ -384,6 +408,34 @@ async def dedup_forever(session_factory, grouper, *, tick_seconds: float = 900.0
         await asyncio.sleep(tick_seconds)
 
 
+def build_ingest_dedup_from_env(session_factory):  # pragma: no cover — needs OpenAI
+    """Assemble the ingest-time event dedup (Phase B): the pairwise LLM arbiter (reuses the
+    publish-time judge) + merge config. The judge is only used for the grey zone."""
+    from newsroom.analyze.ingest_dedup import IngestDedup, load_merge_config
+    from newsroom.publishers.predup import LLMTwinJudge
+
+    return IngestDedup(session_factory, judge=LLMTwinJudge(),
+                       config=load_merge_config(CONFIG_DIR / "dedup.yaml"))
+
+
+async def ingest_dedup_forever(session_factory, dedup, *, enforce: bool = False,
+                               tick_seconds: float = 60.0,
+                               stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Merge duplicate events EARLY (Phase B) — right after clustering, before the fact
+    base / fact-check / editorial spend on them. Observe mode only logs the verdict.
+    Nothing is published."""
+    from newsroom.analyze.ingest_dedup import dedup_new_events
+
+    while not (stop and stop.is_set()):
+        try:
+            stats = await asyncio.to_thread(dedup_new_events, session_factory, dedup, enforce=enforce)
+            if stats.get("merged") or stats.get("checked"):
+                log.info("ingest dedup tick", extra=bind(**stats))
+        except Exception:
+            log.exception("ingest dedup tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
     """Assemble the LLM editorial ranker (comparative curation)."""
     from newsroom.editorial import LLMEditorialRanker
@@ -394,35 +446,40 @@ def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
 async def curation_forever(session_factory, ranker, *, grouper=None, digest_config=None,
                            significance_threshold: float | None = None,
                            window_hours: int = 6, tick_seconds: float = 120.0,
+                           require_dedup_settled: bool = False, dedup_every: int = 15,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Mark recent significant events publish/hold (must-publish deterministically,
     the rest by comparative LLM ranking), before editorial. Only publish-marked
     events are drafted — the count follows the news, not a fixed rate.
 
-    Per tick, in order: reserve attacks for the digest, dedup, then curate. Both
-    reserve and dedup set curated/duplicate_of, and curation excludes those — so an
-    attack (→ digest) or a cross-source duplicate is caught BEFORE curation can
-    must-publish it individually. Their own slow loops let attacks/dupes slip through
-    the 30s editorial loop first; running them here closes that race."""
+    Per tick: reserve attacks for the digest (cheap, DB-only), then curate. The old LLM
+    BATCH dedup runs only every `dedup_every` ticks (≈30 min at a 120s tick), not every
+    tick: publish-time + ingest dedup (Phase A/B) now catch cross-source twins
+    incrementally, so re-sending ~80 titles to the LLM every 2 min was mostly wasted work.
+    It stays as slow background insurance for anything they miss. Reserve still runs every
+    tick so an attack is caught before curation can must-publish it."""
     from newsroom.editorial import curate_pending, dedup_pending, reserve_attacks
 
+    ticks = 0
     while not (stop and stop.is_set()):
         try:
             if digest_config is not None:
                 rstats = await asyncio.to_thread(reserve_attacks, session_factory, digest_config)
                 if rstats.get("reserved"):
                     log.info("digest reserve tick", extra=bind(**rstats))
-            if grouper is not None:
+            if grouper is not None and ticks % max(1, dedup_every) == 0:
                 dstats = await asyncio.to_thread(dedup_pending, session_factory, grouper)
                 if dstats.get("duplicates"):
                     log.info("dedup tick", extra=bind(**dstats))
             stats = await asyncio.to_thread(
                 curate_pending, session_factory, ranker,
-                significance_threshold=significance_threshold, window_hours=window_hours)
+                significance_threshold=significance_threshold, window_hours=window_hours,
+                require_dedup_settled=require_dedup_settled)
             if stats.get("curated"):
                 log.info("curation tick", extra=bind(**stats))
         except Exception:
             log.exception("curation tick failed")
+        ticks += 1
         await asyncio.sleep(tick_seconds)
 
 
@@ -481,6 +538,22 @@ def build_publisher_from_env(session_factory):
     # read again). On by default; MEDIA_PURGE_AFTER_PUBLISH=false keeps them.
     media_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
     purge = os.getenv("MEDIA_PURGE_AFTER_PUBLISH", "true").strip().lower() in {"1", "true", "yes"}
+
+    # Publish-time dedup (Phase A): the last-second twin check. Off by default. In observe
+    # mode (PREPUBLISH_DEDUP_ENFORCE off) it only LOGS its verdict; enforce acts on it.
+    predup = None
+    if prepublish_dedup_enabled():
+        from newsroom.publishers import LLMTwinJudge, PrepublishDedup, load_predup_config
+
+        predup = PrepublishDedup(
+            session_factory,
+            judge=LLMTwinJudge(),
+            config=load_predup_config(CONFIG_DIR / "dedup.yaml"),
+        )
+        log.info("publish-time dedup enabled", extra=bind(enforce=prepublish_dedup_enforce()))
+    else:
+        log.info("publish-time dedup disabled (PREPUBLISH_DEDUP_ENABLED off)")
+
     # When vision moderation is off, don't require a vision verdict to attach media —
     # otherwise no media could ever attach. The reuse (pHash) check still gates.
     return Publisher(
@@ -492,6 +565,8 @@ def build_publisher_from_env(session_factory):
         media_store=media_store,
         purge_media_after_publish=purge,
         require_vision=media_moderation_enabled(),
+        predup=predup,
+        predup_enforce=prepublish_dedup_enforce(),
     )
 
 
@@ -839,6 +914,15 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
 
     if verify_enabled():
         verifier = build_verifier_from_env(session_factory)
+        # recover items claimed (`processing`) but left unfinished by a previous crash
+        try:
+            from newsroom.analyze.verify import reset_stuck_processing
+
+            reset = reset_stuck_processing(session_factory)
+            if reset:
+                log.warning("startup: reset stuck verify items", extra=bind(count=reset))
+        except Exception:
+            log.exception("verify processing reset failed")
         tasks.append(asyncio.create_task(verify_forever(session_factory, verifier)))
         log.info("verification enabled")
     else:
@@ -864,10 +948,16 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     else:
         log.info("media download disabled (MEDIA_DOWNLOAD_ENABLED off)")
 
+    # In ENFORCE mode the LLM stages wait for the ingest-dedup verdict, so a duplicate is
+    # merged before they spend tokens (Phase B savings). In observe mode there are no merges,
+    # so no gating — the pipeline is untouched during calibration.
+    dedup_gate = ingest_dedup_enforce()
+
     if factbase_enabled():
         builder = build_factbase_builder_from_env(session_factory)
         tasks.append(asyncio.create_task(factbase_forever(
-            session_factory, builder, significance_threshold=significance_threshold)))
+            session_factory, builder, significance_threshold=significance_threshold,
+            require_dedup_settled=dedup_gate)))
         log.info("fact base enabled")
     else:
         log.info("fact base disabled (FACTBASE_ENABLED off)")
@@ -877,7 +967,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         fc_risk = ("high", "critical") if factcheck_high_only() else None
         tasks.append(asyncio.create_task(factcheck_forever(
             session_factory, checker, significance_threshold=significance_threshold,
-            risk_levels=fc_risk)))
+            risk_levels=fc_risk, require_dedup_settled=dedup_gate)))
         log.info("fact-checking enabled", extra=bind(high_only=bool(fc_risk)))
     else:
         log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
@@ -909,10 +999,21 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if story_updates_enabled():
         updater = build_story_updater_from_env(session_factory)
         tasks.append(asyncio.create_task(story_updates_forever(
-            session_factory, updater, significance_threshold=significance_threshold)))
+            session_factory, updater, significance_threshold=significance_threshold,
+            require_dedup_settled=dedup_gate)))
         log.info("story updates enabled")
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
+
+    # Ingest-time event merge (Phase B): fold duplicate events into an earlier twin right
+    # after clustering, before the fact base / fact-check / editorial spend on them.
+    if ingest_dedup_enabled():
+        ingest_dedup = build_ingest_dedup_from_env(session_factory)
+        tasks.append(asyncio.create_task(
+            ingest_dedup_forever(session_factory, ingest_dedup, enforce=ingest_dedup_enforce())))
+        log.info("ingest dedup enabled", extra=bind(enforce=ingest_dedup_enforce()))
+    else:
+        log.info("ingest dedup disabled (INGEST_DEDUP_ENABLED off)")
 
     # Dedup runs together with curation (dedup first, same tick) so a duplicate is
     # marked before curation can pass it on to drafting. Only when curation is off
@@ -935,7 +1036,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         ranker = build_editorial_ranker_from_env()
         tasks.append(asyncio.create_task(curation_forever(
             session_factory, ranker, grouper=grouper, digest_config=curation_digest_config,
-            significance_threshold=significance_threshold)))
+            significance_threshold=significance_threshold, require_dedup_settled=dedup_gate)))
         log.info("editorial curation enabled", extra=bind(digest_reserve=curation_digest_config is not None))
     else:
         if grouper is not None:            # curation off: dedup still needs a loop
@@ -953,6 +1054,14 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
 
     publisher = build_publisher_from_env(session_factory)
     if publisher.telegram.is_enabled():
+        # Recover posts stuck mid-send from a previous crash BEFORE the publish loop starts,
+        # so an ambiguous delivery is flagged for a human instead of silently re-sent.
+        try:
+            stuck = await asyncio.to_thread(publisher.reconcile_pending_deliveries)
+            if stuck:
+                log.warning("startup: reconciled stuck deliveries", extra=bind(count=stuck))
+        except Exception:
+            log.exception("delivery reconciliation failed")
         tasks.append(asyncio.create_task(publish_forever(session_factory, publisher)))
         log.info("publishing enabled")
         admin_raw = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
@@ -963,8 +1072,15 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
                 admin_id = int(admin_raw)
             except (TypeError, ValueError):
                 admin_id = None
+            admin_user_raw = os.getenv("TELEGRAM_ADMIN_USER_ID", "").strip()
+            try:
+                admin_user_id = int(admin_user_raw) if admin_user_raw else (
+                    admin_id if admin_id is not None and admin_id > 0 else None
+                )
+            except (TypeError, ValueError):
+                admin_user_id = None
             bot = SupervisionBot(session_factory, publisher.telegram, admin_chat_id=admin_id,
-                                 console=AdminConsole(session_factory))
+                                 admin_user_id=admin_user_id, console=AdminConsole(session_factory))
             tasks.append(asyncio.create_task(bot.poll_forever()))
             log.info("supervision bot + admin console enabled")
         if digest_enabled():

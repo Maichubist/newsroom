@@ -23,11 +23,19 @@ from newsroom.models.analytical import (
     TaxonomyNode,
 )
 from newsroom.models.publication import (
+    PUBLICATION_STATUSES,
+    STATUS_DRAFT,
+    STATUS_PUBLISH_AMBIGUOUS,
+    STATUS_PUBLISHED,
+    STATUS_PUBLISHING,
+    STATUS_REVIEW,
+    STATUS_SUPERSEDED,
     ChannelMetric,
     ItemMetric,
     Publication,
     PublicationMetric,
     SourceMetric,
+    is_valid_publication_status,
 )
 from newsroom.models.service import Decision, ReputationEvent, SystemState
 
@@ -38,6 +46,9 @@ __all__ = [
     "Event", "EventItem", "Story", "StoryVersion", "Claim", "ClaimEvidence", "TaxonomyNode",
     # publication
     "Publication", "PublicationMetric", "ChannelMetric", "ItemMetric", "SourceMetric",
+    "PUBLICATION_STATUSES", "is_valid_publication_status",
+    "STATUS_DRAFT", "STATUS_PUBLISHED", "STATUS_PUBLISHING", "STATUS_REVIEW",
+    "STATUS_SUPERSEDED", "STATUS_PUBLISH_AMBIGUOUS",
     # service
     "ReputationEvent", "Decision", "SystemState",
 ]

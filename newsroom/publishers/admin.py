@@ -227,6 +227,35 @@ def report_subscriptions(session_factory, *, limit: int = 15) -> str:
     return _pre(html.escape(head) + "\n\n" + _table(["канал", "handle", "актив"], data))
 
 
+def report_review(session_factory, *, limit: int = 15) -> str:
+    """Drafts held by the publish-time dedup (status='review') awaiting a manual
+    decision, with the reason from the predup decision log. Read-only — the actual
+    publish/drop action is a button on the supervisor notice, not a console command."""
+    from sqlalchemy import select
+
+    from newsroom.models import Decision, Publication
+
+    with session_factory() as s:
+        rows = s.execute(
+            select(Publication.id, Publication.event_id, Publication.headline)
+            .where(Publication.status == "review").order_by(Publication.id.desc()).limit(limit)
+        ).all()
+        if not rows:
+            return "Немає чернеток на розгляді (predup нічого не притримав)."
+        reasons: dict[int, str] = {}
+        for pid, _eid, _h in rows:
+            dec = s.execute(
+                select(Decision.reason).where(
+                    Decision.entity_type == "publication", Decision.entity_id == str(pid),
+                    Decision.stage == "predup",
+                ).order_by(Decision.id.desc())
+            ).scalars().first()
+            reasons[pid] = dec or "—"
+    data = [[pid, eid, (h or "")[:34], (reasons.get(pid) or "")[:28]] for pid, eid, h in rows]
+    return _pre("Чернетки на розгляді (можливі дублі)\n\n"
+                + _table(["pub", "event", "headline", "причина"], data))
+
+
 def report_sources(session_factory, *, limit: int = 30) -> str:
     from sqlalchemy import func, select
 
@@ -357,6 +386,7 @@ HELP = (
     "🛠 Команди адмін-консолі\n"
     "/stats — стан пайплайна\n"
     "/pub [N] — останні опубліковані пости\n"
+    "/review [N] — чернетки на розгляді (можливі дублі)\n"
     "/topics [N] — гарячі теми з постів конкурентів\n"
     "/demand — індекс попиту за рубриками\n"
     "/sources — джерела-конкуренти й підписники\n"
@@ -404,6 +434,8 @@ class AdminConsole:
             return report_stats(self.sf)
         if cmd == "pub":
             return report_publications(self.sf, limit=_int(args, 10, lo=1, hi=30))
+        if cmd == "review":
+            return report_review(self.sf, limit=_int(args, 15, lo=1, hi=50))
         if cmd == "topics":
             return report_topics(self.sf, limit=_int(args, 25, lo=1, hi=50))
         if cmd == "demand":

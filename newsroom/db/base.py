@@ -59,6 +59,11 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS purged_at timestamptz",
     # Telegram message id for re-fetching url-less media via Telethon
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS source_ref text",
+    # decisions is the hottest write path (every stage + observe-mode dedup logs here).
+    # These indexes keep the frequent lookups (by entity, by stage/time) and retention
+    # pruning fast as the table grows. Additive; safe to re-run.
+    "CREATE INDEX IF NOT EXISTS idx_decisions_entity ON decisions (entity_type, entity_id, stage)",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_stage_created ON decisions (stage, created_at)",
 )
 
 

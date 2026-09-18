@@ -1,0 +1,25 @@
+# Publish-time deduplication (charter v0.3) — the last-second "did we just post this?" check.
+# Parsed by newsroom/publishers/predup.py (load_predup_config). Thresholds are
+# CALIBRATION-PENDING: run in observe mode first (PREPUBLISH_DEDUP_ENFORCE=false),
+# then tune from the logged decisions (decisions.stage = "predup").
+version: 0.3
+
+predup:
+  # how far back to look for a twin (draft or published)
+  window_hours: 72
+  # centroid cosine that makes an event a CANDIDATE (a low net, not a duplicate verdict —
+  # cross-source twins sit ~0.55-0.70; the LLM arbiter makes the actual call)
+  vector_candidate: 0.55
+  # SimHash Hamming distance under which two texts are near-duplicate (rewritten copy)
+  simhash_max: 6
+  # at most this many nearest candidates go to the LLM arbiter (cost bound)
+  top_candidates: 3
+
+# Phase B — ingest-time event merge: fold a freshly-clustered event into an earlier
+# twin BEFORE the expensive stages (fact base / fact-check / editorial) run on it.
+# Same signals as predup; window ≈ the clustering window.
+merge:
+  window_hours: 48
+  vector_candidate: 0.55
+  simhash_max: 6
+  top_candidates: 3

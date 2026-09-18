@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from newsroom.analyze.risk import load_risk_matrix
 from newsroom.analyze.signal import load_filters
 from newsroom.analyze.stoplist import load_stoplist
-from newsroom.analyze.verify import Classification, Verifier, verify_pending
+from newsroom.analyze.verify import Classification, Verifier, reset_stuck_processing, verify_pending
 from newsroom.db import make_session_factory
 from newsroom.db.base import EMBEDDING_DIM
 from newsroom.models import Item, Source
@@ -117,3 +117,22 @@ def test_verify_pending_processes_new_items_only(pg_engine):
         # the two iran items clustered together; the advert was filtered out
         assert stats.get("clustered", 0) == 2
         assert stats.get("filtered_out", 0) == 1
+
+
+def test_reset_stuck_processing_recovers_claimed_items(pg_engine):
+    # items left `processing` by a crash mid-verify are reset to `new` for reprocessing
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="rp-src", name="S", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        s.add(Item(source_id=src.id, external_id="stuck", content_hash="s".ljust(64, "0"),
+                   status="processing"))
+        s.add(Item(source_id=src.id, external_id="done", content_hash="d".ljust(64, "0"),
+                   status="clustered"))
+        s.commit()
+
+    assert reset_stuck_processing(sf) == 1                # only the stuck one
+    with Session(pg_engine) as s:
+        assert s.scalar(select(func.count()).select_from(Item).where(Item.status == "new")) == 1
+        assert s.scalar(select(func.count()).select_from(Item).where(Item.status == "clustered")) == 1

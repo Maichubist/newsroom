@@ -11,6 +11,20 @@ from newsroom.publishers.gate import (
     set_publishing_stopped,
 )
 from newsroom.publishers.pipeline import Publisher, PublishOutcome
+from newsroom.publishers.predup import (
+    LLMTwinJudge,
+    PredupConfig,
+    PrepublishDedup,
+    TwinJudge,
+    TwinJudgment,
+    TwinPair,
+    TwinVerdict,
+    candidate_signals,
+    classify_signals,
+    find_publish_candidates,
+    load_predup_config,
+    parse_twin_judgment,
+)
 from newsroom.publishers.supervision import Supervisor, format_publish_notice, supervision_keyboard
 from newsroom.publishers.bot import CallbackAction, SupervisionBot, parse_callback
 from newsroom.publishers.admin import AdminConsole
@@ -39,6 +53,10 @@ __all__ = [
     "is_publishing_stopped", "set_publishing_stopped", "STOP_KEY",
     # orchestration (§10, §13)
     "Publisher", "PublishOutcome",
+    # publish-time dedup (Phase A)
+    "PrepublishDedup", "PredupConfig", "load_predup_config", "LLMTwinJudge",
+    "TwinJudge", "TwinJudgment", "TwinPair", "TwinVerdict",
+    "candidate_signals", "classify_signals", "find_publish_candidates", "parse_twin_judgment",
     # supervision (§10)
     "Supervisor", "format_publish_notice", "supervision_keyboard",
     "SupervisionBot", "CallbackAction", "parse_callback", "AdminConsole",

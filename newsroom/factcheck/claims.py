@@ -84,13 +84,12 @@ class LLMClaimExtractor:  # pragma: no cover - network
 
     def _call(self, news_text: str) -> str | None:
         try:
-            resp = self._ensure_client().chat.completions.create(
-                model=self.model,
+            from newsroom.llmutil import chat_json
+
+            return chat_json(
+                self._ensure_client(), model=self.model,
                 messages=[{"role": "user", "content": fill_prompt(self.prompt, news_text=news_text)}],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            return resp.choices[0].message.content
+                op="factcheck_claims", max_tokens=1536)
         except Exception as exc:  # noqa: BLE001
             log.warning("claim extraction failed", extra={"error": str(exc)})
             return None

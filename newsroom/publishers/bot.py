@@ -23,8 +23,11 @@ log = logging.getLogger("newsroom.publishers.bot")
 
 @dataclass(frozen=True)
 class CallbackAction:
-    kind: str                 # retract | stop | resume | unknown
+    kind: str                 # retract | stop | resume | review_publish | review_drop | unknown
     publication_id: int | None = None
+
+
+_PUB_PREFIXES = ("retract", "review_publish", "review_drop")
 
 
 def parse_callback(data: str | None) -> CallbackAction:
@@ -36,22 +39,24 @@ def parse_callback(data: str | None) -> CallbackAction:
         return CallbackAction("stop")
     if data == "resume":
         return CallbackAction("resume")
-    if data.startswith("retract:"):
-        _, _, raw = data.partition(":")
-        try:
-            return CallbackAction("retract", publication_id=int(raw))
-        except (TypeError, ValueError):
-            return CallbackAction("unknown")
+    for prefix in _PUB_PREFIXES:
+        if data.startswith(prefix + ":"):
+            _, _, raw = data.partition(":")
+            try:
+                return CallbackAction(prefix, publication_id=int(raw))
+            except (TypeError, ValueError):
+                return CallbackAction("unknown")
     return CallbackAction("unknown")
 
 
 class SupervisionBot:
     def __init__(self, session_factory, telegram, *, admin_chat_id: int | None = None,
-                 console=None, charter_version: str = "0.2"):
+                 admin_user_id: int | None = None, console=None, charter_version: str = "0.2"):
         self.sf = session_factory
         self.telegram = telegram
         # admin_chat_id + console enable text /commands from the admin chat only.
         self.admin_chat_id = admin_chat_id
+        self.admin_user_id = admin_user_id
         self.console = console
         self.charter_version = charter_version
 
@@ -65,6 +70,10 @@ class SupervisionBot:
             return "Публікацію відновлено"
         if action.kind == "retract" and action.publication_id is not None:
             return self._retract(action.publication_id)
+        if action.kind == "review_publish" and action.publication_id is not None:
+            return self._review_release(action.publication_id)
+        if action.kind == "review_drop" and action.publication_id is not None:
+            return self._review_drop(action.publication_id)
         return "Невідома дія"
 
     def _set_stop(self, stopped: bool, reason: str) -> None:
@@ -97,11 +106,59 @@ class SupervisionBot:
             s.commit()
         return "Відкликано" if deleted else "Позначено відкликаним (повідомлення не видалено)"
 
+    def _review_release(self, publication_id: int) -> str:
+        """Release a draft held by the publish-time dedup: back to 'draft' with a one-shot
+        override so the twin check does not re-hold it, and it publishes next tick."""
+        from newsroom.models import Decision, Publication
+
+        with self.sf() as s:
+            pub = s.get(Publication, publication_id)
+            if pub is None:
+                return "Публікацію не знайдено"
+            if pub.status != "review":
+                return f"Не на розгляді ({pub.status})"
+            pub.status = "draft"
+            pub.features = {**(pub.features or {}), "predup_override": True}
+            s.add(Decision(
+                entity_type="publication", entity_id=str(publication_id), stage="predup",
+                decision="review_released", reason="supervisor override",
+                details={}, charter_version=self.charter_version,
+            ))
+            s.commit()
+        return "Повернуто в чергу на публікацію"
+
+    def _review_drop(self, publication_id: int) -> str:
+        """Drop a held draft: mark it superseded so it never publishes."""
+        from newsroom.models import Decision, Publication
+
+        with self.sf() as s:
+            pub = s.get(Publication, publication_id)
+            if pub is None:
+                return "Публікацію не знайдено"
+            if pub.status != "review":
+                return f"Не на розгляді ({pub.status})"
+            pub.status = "superseded"
+            s.add(Decision(
+                entity_type="publication", entity_id=str(publication_id), stage="predup",
+                decision="review_dropped", reason="supervisor drop",
+                details={}, charter_version=self.charter_version,
+            ))
+            s.commit()
+        return "Чернетку відхилено"
+
     def handle_update(self, update: dict) -> bool:
         """Dispatch one Telegram update (callback button or admin text command).
         Returns True if it was handled."""
         callback = update.get("callback_query")
         if callback:
+            if not self._callback_is_authorized(callback):
+                cq_id = callback.get("id")
+                if cq_id:
+                    try:
+                        self.telegram.answer_callback_query(cq_id, text="Немає доступу")
+                    except Exception:  # noqa: BLE001
+                        log.warning("answer_callback_query failed")
+                return True
             action = parse_callback((callback.get("data") or ""))
             result = self.handle(action)
             cq_id = callback.get("id")
@@ -112,6 +169,17 @@ class SupervisionBot:
                     log.warning("answer_callback_query failed")
             return True
         return self._handle_message(update.get("message") or {})
+
+    def _callback_is_authorized(self, callback: dict) -> bool:
+        """Callback data is untrusted; controls are restricted to the configured admin."""
+        if self.admin_chat_id is None:
+            return False
+        chat_id = ((callback.get("message") or {}).get("chat") or {}).get("id")
+        if chat_id != self.admin_chat_id:
+            return False
+        if self.admin_user_id is not None:
+            return ((callback.get("from") or {}).get("id")) == self.admin_user_id
+        return True
 
     def _handle_message(self, message: dict) -> bool:
         """Dispatch a text /command — ONLY from the admin chat (the trust boundary)."""
