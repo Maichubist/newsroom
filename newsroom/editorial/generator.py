@@ -30,6 +30,7 @@ class GenerationContext:
     status: str = "confirmed"
     facts: list[str] = field(default_factory=list)   # from the event's shared fact base (§8)
     source_excerpt: str = ""                          # trimmed source text, for concrete detail
+    register: str = ""                                # human rubric name for the tone hint (spine display); falls back to rubrics[0]
 
 
 class Generator(Protocol):
@@ -45,8 +46,9 @@ def build_material(context: GenerationContext) -> str:
     parts: list[str] = []
     if context.title:
         parts.append(f"Подія: {context.title.strip()}")
-    if context.rubrics:
-        parts.append("Рубрика: " + context.rubrics[0].strip())
+    label = context.register.strip() or (context.rubrics[0].strip() if context.rubrics else "")
+    if label:
+        parts.append("Рубрика: " + label)
     if context.facts:
         bullets = "\n".join(f"- {f.strip()}" for f in context.facts if f and f.strip())
         if bullets:

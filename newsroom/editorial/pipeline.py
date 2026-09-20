@@ -35,6 +35,7 @@ class EditorialPipeline:
         ai_accent_patterns,
         charter_version: str = "0.2",
         prompt_version: str = "0.2",
+        spine=None,
     ):
         self.sf = session_factory
         self.generator = generator
@@ -42,6 +43,9 @@ class EditorialPipeline:
         self.ai_accent_patterns = ai_accent_patterns
         self.charter_version = charter_version
         self.prompt_version = prompt_version
+        # taxonomy spine: gives the generator the Ukrainian rubric name for its register
+        # (tone) hint instead of the raw English slug (law_crime -> "Кримінал і право").
+        self.spine = spine
 
     def produce(self, event_id: int) -> ProduceResult:
         from sqlalchemy import select
@@ -68,8 +72,13 @@ class EditorialPipeline:
         # show "Повідомляють:" only where the confidence level matters — a
         # single-source high/critical item — not on routine reported news.
         reported = status == "reported" and risk_level in ("high", "critical")
+        register = ""
+        if self.spine is not None and rubrics:
+            slug = self.spine.resolve(rubrics[0])
+            if slug:
+                register = self.spine.rubrics[slug].display
         ctx = GenerationContext(title=title, summary=summary, rubrics=rubrics, status=status,
-                                facts=facts, source_excerpt=source_excerpt)
+                                facts=facts, source_excerpt=source_excerpt, register=register)
 
         # A generation that failed (fallback) or produced no real content must not
         # become a post: leave the event undrafted so the next tick retries it once

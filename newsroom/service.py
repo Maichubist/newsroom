@@ -359,6 +359,7 @@ async def story_updates_forever(session_factory, updater, *, tick_seconds: float
 def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — needs OpenAI
     """Assemble the editorial pipeline (LLM generator + charter configs)."""
     from newsroom.analyze.ai_accent import load_ai_accent
+    from newsroom.analyze.spine import load_spine
     from newsroom.analyze.stoplist import load_stoplist
     from newsroom.editorial import EditorialPipeline, LLMGenerator
 
@@ -367,6 +368,7 @@ def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — 
         generator=LLMGenerator(),
         stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
         ai_accent_patterns=load_ai_accent(CONFIG_DIR / "ai_accent.yaml"),
+        spine=load_spine(CONFIG_DIR / "taxonomy_spine.yaml"),
     )
 
 

@@ -26,6 +26,15 @@ def test_material_without_facts_falls_back_to_title_and_source():
     assert "Факти" not in material          # no facts section when there are none
 
 
+def test_register_display_overrides_raw_slug_in_material():
+    # the register (spine display) is the tone hint, not the English slug
+    ctx = GenerationContext(title="Подія", rubrics=["law_crime"], register="Кримінал і право")
+    material = build_material(ctx)
+    assert "Рубрика: Кримінал і право" in material and "law_crime" not in material
+    # falls back to the rubric when no register is given
+    assert "Рубрика: economy" in build_material(GenerationContext(title="t", rubrics=["economy"]))
+
+
 def test_material_includes_rubric_for_register():
     ctx = GenerationContext(title="Шахтар зіграв внічию", rubrics=["sport"],
                             source_excerpt="Матч завершився 1:1.")
