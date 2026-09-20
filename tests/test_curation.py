@@ -164,8 +164,9 @@ def test_attack_reserved_to_digest_beats_must_publish(pg_engine):
 
 
 @pytest.mark.pg
-def test_curate_pending_attaches_taxonomy_heat_to_ranker(pg_engine):
-    # the pyramid's node heat (max along the event's path) is the popularity signal now
+def test_curate_pending_attaches_l2_heat_and_demand_to_ranker(pg_engine):
+    # popularity is read from the L2 (depth-1) topic node — not max-along-path — so a
+    # routine sub-topic stays cold under a hot broad rubric. Both heat and demand attach.
     from newsroom.analyze.taxonomy import ingest_path
     from newsroom.db import make_session_factory
     from newsroom.models import Event, TaxonomyNode
@@ -173,19 +174,23 @@ def test_curate_pending_attaches_taxonomy_heat_to_ranker(pg_engine):
     sf = make_session_factory(pg_engine)
     now = dt.datetime.now(dt.timezone.utc)
     with Session(pg_engine) as s:
-        leaf = ingest_path(s, ["економіка", "ринок", "акції"])
-        node = s.get(TaxonomyNode, leaf)
-        node.heat = 0.9          # a hot leaf (as refresh_taxonomy_heat would set)
+        leaf = ingest_path(s, ["економіка", "ринок", "акції"])   # L1 економіка / L2 ринок / L3 акції
+        l2_id = s.get(TaxonomyNode, leaf).parent_id
+        l2 = s.get(TaxonomyNode, l2_id)
+        l2.heat = 0.9            # the L2 node carries the signal (as refresh_taxonomy_heat sets it)
+        l2.demand = 0.7
         ev = Event(status="confirmed", risk_level="low", rubric="economy", title="Подія",
-                   significance=0.8, topic_leaf_id=leaf, first_seen_at=now)
+                   topic_leaf_id=leaf, first_seen_at=now)
         s.add(ev)
         s.flush()
         eid = ev.id
         s.commit()
 
     ranker = FakeRanker({eid: "publish"})
-    curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
-    assert ranker.candidates and ranker.candidates[0].heat == pytest.approx(0.9)   # max heat along path
+    curate_pending(sf, ranker, window_hours=6)
+    assert ranker.candidates
+    assert ranker.candidates[0].heat == pytest.approx(0.9)      # L2 node heat
+    assert ranker.candidates[0].demand == pytest.approx(0.7)    # L2 node demand
 
 
 @pytest.mark.pg

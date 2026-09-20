@@ -251,7 +251,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         conditions.append(dedup_clause)
 
     from newsroom.analyze.demand import load_demand
-    from newsroom.analyze.taxonomy import load_event_heat
+    from newsroom.analyze.taxonomy import load_event_signals
     from newsroom.models import Publication
 
     with session_factory() as s:
@@ -267,8 +267,10 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         if not rows:
             return {"curated": 0, "publish": 0, "hold": 0, "must": 0}
 
-        demand_by_rubric = load_demand(s)                        # learned audience demand per rubric ({} until data)
-        event_heat = load_event_heat(s, [r[0] for r in rows])   # taxonomy-pyramid heat per event (0 until data)
+        demand_by_rubric = load_demand(s)                        # L1 rubric-demand fallback ({} until data)
+        # per-event (heat, demand) from the L2 topic node — the two-top-levels popularity
+        # signal, so a routine sub-topic stays cold under a hot broad rubric.
+        event_signals = load_event_signals(s, [r[0] for r in rows])
 
     decisions: dict[int, str] = {}
     must_ids: set[int] = set()
@@ -280,10 +282,13 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             decisions[eid] = CURATE_PUBLISH
             must_ids.add(eid)
         else:
+            heat, node_demand = event_signals.get(eid, (0.0, 0.0))
+            # L2 node demand is primary; fall back to the L1 rubric-demand index when the
+            # topic has no engagement data yet (or the event is unplaced on the pyramid).
+            demand = node_demand or (demand_by_rubric.get(rubric) if rubric else None)
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
                                      significance=sig, facts=_facts_brief(fact_base),
-                                     demand=demand_by_rubric.get(rubric) if rubric else None,
-                                     heat=event_heat.get(eid) or None))
+                                     demand=demand, heat=heat or None))
     must_count = len(decisions)
 
     if to_rank:

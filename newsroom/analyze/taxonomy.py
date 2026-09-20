@@ -97,7 +97,9 @@ def compute_node_heat(session, *, window_hours: int = 24, halflife_hours: float 
     reach-normalised rate — same as demand/topics) to its leaf AND every ancestor, so a
     node's raw score is the rolled-up activity of everything beneath it. Scores are then
     min-max normalized WITHIN each depth level, so a specific leaf can be 'hot' relative to
-    its peers, not drowned by the always-large roots. Returns {node_id: {heat, events, depth}}.
+    its peers, not drowned by the always-large roots. `demand` is the same rollup but on
+    engagement ALONE (no recency) — a steadier "how much does the audience care about this
+    topic" signal. Returns {node_id: {heat, demand, events, depth}}.
     """
     from collections import defaultdict
 
@@ -150,31 +152,41 @@ def compute_node_heat(session, *, window_hours: int = 24, halflife_hours: float 
     parent = dict(session.execute(select(TaxonomyNode.id, TaxonomyNode.parent_id)).all())
     depth = dict(session.execute(select(TaxonomyNode.id, TaxonomyNode.depth)).all())
 
-    raw: dict[int, float] = defaultdict(float)
+    raw: dict[int, float] = defaultdict(float)          # heat: recency × (1 + engagement)
+    eng_raw: dict[int, float] = defaultdict(float)      # demand: engagement only (no recency)
     ev_count: dict[int, int] = defaultdict(int)
     for eid, leaf_id, seen_at in ev_rows:
         if leaf_id not in parent:
             continue
         age_h = max((now - seen_at).total_seconds() / 3600.0, 0.0) if seen_at else float(window_hours)
         recency = math.exp(-age_h / halflife_hours) if halflife_hours > 0 else 1.0
-        contribution = recency * (1.0 + eng_by_event.get(eid, 0.0))
+        eng = eng_by_event.get(eid, 0.0)
+        contribution = recency * (1.0 + eng)
         node = leaf_id
         guard = 0
         while node is not None and guard < 32:      # guard against a cycle
             raw[node] += contribution
+            eng_raw[node] += eng
             ev_count[node] += 1
             node = parent.get(node)
             guard += 1
 
-    # normalize within each depth level
-    by_level: dict[int, dict[int, float]] = defaultdict(dict)
-    for nid, score in raw.items():
-        by_level[depth.get(nid, 0)][nid] = score
-    heat: dict[int, float] = {}
-    for scores in by_level.values():
-        heat.update(_minmax(scores))
+    def _norm_by_level(scores_map: dict[int, float]) -> dict[int, float]:
+        by_level: dict[int, dict[int, float]] = defaultdict(dict)
+        for nid, score in scores_map.items():
+            by_level[depth.get(nid, 0)][nid] = score
+        out: dict[int, float] = {}
+        for scores in by_level.values():
+            out.update(_minmax(scores))
+        return out
 
-    return {nid: {"heat": round(heat.get(nid, 0.0), 4), "events": ev_count[nid], "depth": depth.get(nid, 0)}
+    heat = _norm_by_level(raw)
+    # demand is pure audience engagement; when NO engagement exists yet, leave it empty
+    # (so curation falls back to the L1 rubric-demand index) rather than a flat 0.5.
+    demand = _norm_by_level(eng_raw) if any(v > 0 for v in eng_raw.values()) else {}
+
+    return {nid: {"heat": round(heat.get(nid, 0.0), 4), "demand": round(demand.get(nid, 0.0), 4),
+                  "events": ev_count[nid], "depth": depth.get(nid, 0)}
             for nid in raw}
 
 
@@ -194,12 +206,14 @@ def refresh_taxonomy_heat(session_factory, *, window_hours: int = 24,
             node = s.get(TaxonomyNode, nid)
             if node is not None:
                 node.heat = d["heat"]
+                node.demand = d["demand"]
                 node.heat_events = d["events"]
                 node.heat_at = now
-        # clear stale heat on nodes that dropped out of the window
+        # clear stale heat/demand on nodes that dropped out of the window
         for node in s.execute(select(TaxonomyNode).where(TaxonomyNode.heat > 0)).scalars():
             if node.id not in active:
                 node.heat = 0.0
+                node.demand = 0.0
                 node.heat_events = 0
                 node.heat_at = now
         s.commit()
@@ -221,10 +235,12 @@ def node_path_labels(nodes_by_id: dict, node_id: int) -> list[str]:
     return list(reversed(chain))
 
 
-def load_event_heat(session, event_ids) -> dict[int, float]:
-    """Per-event topic heat for curation: the MAX heat along the event's path (a hot broad
-    topic or a hot specific leaf both count), from taxonomy_nodes. 0.0 when unplaced/cold.
-    This is the pyramid's popularity signal that replaces the flat keyword hot-topics."""
+def load_event_signals(session, event_ids) -> dict[int, tuple[float, float]]:
+    """Per-event (heat, demand) from the event's L2 (depth-1) topic node — the two-top-
+    levels sweet spot for popularity (L1 too coarse: all war; L3+ too sparse/noisy). Falls
+    back to the L1 (depth-0) node, else (0.0, 0.0). Keying off the SPECIFIC level is what
+    lets a routine sub-topic (війна>втрати) stay 'cold' even under a hot broad rubric,
+    instead of inheriting the hottest ancestor as the old max-along-path did."""
     from sqlalchemy import select
 
     from newsroom.models import Event, TaxonomyNode
@@ -235,23 +251,30 @@ def load_event_heat(session, event_ids) -> dict[int, float]:
     leaf_of = dict(session.execute(
         select(Event.id, Event.topic_leaf_id).where(Event.id.in_(event_ids))
     ).all())
-    nodes = {nid: (heat or 0.0, parent) for nid, heat, parent in session.execute(
-        select(TaxonomyNode.id, TaxonomyNode.heat, TaxonomyNode.parent_id)
-    ).all()}
+    nodes = {nid: (heat or 0.0, demand or 0.0, parent, dep)
+             for nid, heat, demand, parent, dep in session.execute(
+                 select(TaxonomyNode.id, TaxonomyNode.heat, TaxonomyNode.demand,
+                        TaxonomyNode.parent_id, TaxonomyNode.depth)).all()}
 
-    out: dict[int, float] = {}
+    out: dict[int, tuple[float, float]] = {}
     for eid in event_ids:
-        h = 0.0
         nid = leaf_of.get(eid)
+        l1: tuple[float, float] | None = None
+        l2: tuple[float, float] | None = None
         guard = 0
         while nid is not None and guard < 32:
             rec = nodes.get(nid)
             if rec is None:
                 break
-            h = max(h, rec[0])
-            nid = rec[1]
+            heat, demand, parent, dep = rec
+            if dep == 0:
+                l1 = (heat, demand)
+            elif dep == 1:
+                l2 = (heat, demand)
+            nid = parent
             guard += 1
-        out[eid] = round(h, 4)
+        sig = l2 if l2 is not None else (l1 if l1 is not None else (0.0, 0.0))
+        out[eid] = (round(sig[0], 4), round(sig[1], 4))
     return out
 
 
