@@ -324,7 +324,7 @@ class LLMTwinJudge:  # pragma: no cover - network
         incoming, candidate = _render_pair(pair)
         content = fill_prompt(
             self.prompt, incoming=incoming, candidate=candidate,
-            candidate_id=pair.candidate_event_id,
+            candidate_id=str(pair.candidate_event_id),
             candidate_state="опублікована" if pair.candidate_published else "чернетка")
         try:
             from newsroom.llmutil import chat_json

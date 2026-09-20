@@ -13,6 +13,7 @@ gate and the transport seam.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -168,6 +169,52 @@ class TelegramPublisher:
             return PublishResult(False, error=str(err))
         return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id"))
 
+    def send_media_group(self, choices, caption: str, *, chat_id: int | None = None,
+                         reply_to_message_id: int | None = None,
+                         attachments: dict | None = None) -> PublishResult:
+        """Send 2-10 media as an album (sendMediaGroup). `choices` is a list of MediaChoice;
+        `attachments` maps a choice INDEX -> (filename, bytes) for uploaded (local) media —
+        those are referenced by `attach://mN` and sent as multipart parts, the rest by URL.
+        The caption (HTML) goes on the FIRST item only (Telegram shows one caption per group).
+        Returns the FIRST message id (for story reply-chaining)."""
+        if not self.is_enabled():
+            return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
+        target = chat_id if chat_id is not None else self.active_chat_id
+        attachments = attachments or {}
+        media: list[dict] = []
+        files: dict[str, tuple[str, bytes]] = {}
+        for idx, ch in enumerate(choices):
+            entry: dict = {"type": ch.param}
+            if idx in attachments:
+                name = f"m{idx}"
+                files[name] = attachments[idx]
+                entry["media"] = f"attach://{name}"
+            elif ch.url:
+                entry["media"] = ch.url
+            else:
+                continue                       # not sendable (no file, no URL) — skip
+            if not media and caption:          # caption only on the first item that carries content
+                entry["caption"] = caption
+                entry["parse_mode"] = "HTML"
+            media.append(entry)
+        if len(media) < 2:
+            return PublishResult(False, error="media group needs >=2 sendable items")
+
+        payload: dict = {"chat_id": target, "media": json.dumps(media, ensure_ascii=False)}
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        if files:
+            payload["_files"] = files
+        resp = self._poster("sendMediaGroup", payload)
+        if not resp.get("ok"):
+            err = resp.get("description") or resp.get("error") or str(resp)
+            log.warning("telegram media group publish failed", extra={"error": err})
+            return PublishResult(False, error=str(err))
+        result = resp.get("result") or []
+        first_id = result[0].get("message_id") if result else None
+        return PublishResult(True, message_id=first_id)
+
     def send_post(self, body: str, media_choice=None, *, chat_id: int | None = None,
                   reply_to_message_id: int | None = None,
                   file: tuple[str, bytes] | None = None) -> PublishResult:
@@ -210,14 +257,18 @@ class TelegramPublisher:
 
         url = f"https://api.telegram.org/bot{self.token}/{method}"
         upload = payload.pop("_file", None)
+        uploads = payload.pop("_files", None)     # {field_name: (filename, bytes)} for sendMediaGroup
         try:
-            if upload is not None:
+            if upload is not None or uploads is not None:
                 # multipart: scalar fields as form data (bools lowercased for Bot API),
-                # the media field as the uploaded file
+                # the media field(s) as uploaded file(s)
                 data = {}
                 for k, v in payload.items():
                     data[k] = ("true" if v else "false") if isinstance(v, bool) else str(v)
-                files = {upload["field"]: (upload["filename"], upload["data"])}
+                if uploads is not None:
+                    files = {name: (fn, b) for name, (fn, b) in uploads.items()}
+                else:
+                    files = {upload["field"]: (upload["filename"], upload["data"])}
                 r = httpx.post(url, data=data, files=files, timeout=60.0)
             else:
                 r = httpx.post(url, json=payload, timeout=20.0)

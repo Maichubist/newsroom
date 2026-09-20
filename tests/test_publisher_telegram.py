@@ -38,6 +38,58 @@ def test_split_long_text_respects_limit():
     assert "".join(chunks).replace(" ", "").replace("\n", "") == text.replace(" ", "").replace("\n", "")
 
 
+# --- send_media_group (albums) -------------------------------------------------
+
+def test_send_media_group_builds_media_array_with_caption_on_first():
+    import json
+
+    from newsroom.publishers.cascade import MediaChoice
+
+    poster = RecordingPoster([{"ok": True, "result": [{"message_id": 55}, {"message_id": 56}]}])
+    pub = TelegramPublisher("t", -100, enabled=True, poster=poster)
+    choices = [MediaChoice("sendPhoto", "photo", url="http://x/1"),
+               MediaChoice("sendPhoto", "photo", url="http://x/2")]
+    r = pub.send_media_group(choices, "Підпис", reply_to_message_id=None)
+
+    assert r.ok and r.message_id == 55                       # first message id
+    method, payload = poster.calls[0]
+    assert method == "sendMediaGroup"
+    media = json.loads(payload["media"])
+    assert len(media) == 2
+    assert media[0]["media"] == "http://x/1" and media[0]["caption"] == "Підпис" and media[0]["parse_mode"] == "HTML"
+    assert media[1]["media"] == "http://x/2" and "caption" not in media[1]   # caption only on first
+    assert "_files" not in payload                            # URL send, no uploads
+
+
+def test_send_media_group_uploads_local_bytes():
+    import json
+
+    from newsroom.publishers.cascade import MediaChoice
+
+    poster = RecordingPoster([{"ok": True, "result": [{"message_id": 1}]}])
+    pub = TelegramPublisher("t", -100, enabled=True, poster=poster)
+    choices = [MediaChoice("sendPhoto", "photo", storage_key="ab/1"),
+               MediaChoice("sendVideo", "video", url="http://x/v")]
+    r = pub.send_media_group(choices, "cap", attachments={0: ("photo.jpg", b"BYTES")})
+
+    assert r.ok
+    _method, payload = poster.calls[0]
+    media = json.loads(payload["media"])
+    assert media[0]["media"] == "attach://m0" and media[1]["media"] == "http://x/v"   # upload + URL mixed
+    assert payload["_files"]["m0"] == ("photo.jpg", b"BYTES")
+
+
+def test_send_media_group_needs_two_sendable():
+    from newsroom.publishers.cascade import MediaChoice
+
+    poster = RecordingPoster()
+    pub = TelegramPublisher("t", -100, enabled=True, poster=poster)
+    # one URL + one with neither URL nor attachment -> only 1 sendable -> refuse, nothing sent
+    r = pub.send_media_group([MediaChoice("sendPhoto", "photo", url="http://x/1"),
+                              MediaChoice("sendPhoto", "photo")], "cap")
+    assert not r.ok and poster.calls == []
+
+
 # --- gate ----------------------------------------------------------------------
 
 def test_disabled_publisher_refuses_and_touches_no_network():

@@ -138,7 +138,7 @@ class Publisher:
             event = s.get(Event, pub.event_id) if pub.event_id else None
             inputs = self._gather_inputs(s, pub, event)
             body = _render_send_body(pub)
-            media_choice = self._media_choice(s, pub.event_id)
+            media_items = self._eligible_media_items(s, pub.event_id)
             reply_to_pub_id, reply_to_message_id = self._story_reply_target(s, event)
 
         decision = evaluate_gate(inputs, self.limits)
@@ -171,21 +171,8 @@ class Publisher:
         if not self._claim_for_send(publication_id):
             return PublishOutcome(publication_id, skipped=True)
 
-        # Prefer uploading the locally stored bytes over sending a URL: Telegram often
-        # cannot fetch a source URL (telesco.pe / hotlink-protected images 400 with
-        # "failed to get HTTP URL content"). If there is no file and no fetchable URL,
-        # drop the media.
-        media_file = self._media_file(media_choice) if media_choice is not None else None
-        if media_choice is not None and media_file is None and not media_choice.url:
-            media_choice = None
-
-        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id,
-                                         file=media_file)
-        if not result.ok and media_choice is not None:
-            # a post must never be lost to a bad image — retry once as text only
-            log.warning("media send failed; retrying as text",
-                        extra={"publication_id_": publication_id, "error": result.error})
-            result = self.telegram.send_post(body, None, reply_to_message_id=reply_to_message_id)
+        result = self._send_with_media(body, media_items, reply_to_message_id=reply_to_message_id,
+                                       publication_id=publication_id)
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
@@ -280,21 +267,22 @@ class Publisher:
             log.warning("reconciled stuck publishing rows", extra={"count": len(stuck)})
         return len(stuck)
 
-    def _media_choice(self, s, event_id):
-        """Pick media to attach — only for an event whose media passed the §9.4 reuse
+    def _eligible_media_items(self, s, event_id) -> list:
+        """The event's media eligible to attach — only when its media passed the §9.4 reuse
         check (media_clean, no media_reuse) and the image stop-list / vision check
-        (media_vision_ok, no media_vision_block). In doubt, no media (§3.5).
+        (media_vision_ok, no media_vision_block). In doubt, no media (§3.5). Returns a list of
+        MediaItem (empty when gated out). Feeds both the single cascade and the album.
 
-        When vision moderation is disabled (require_vision=False), the vision-ok
-        requirement is dropped — media attaches on the reuse check alone — but an
-        explicit media_vision_block already on record is still honoured. NOTE: this
-        relaxes the charter media stop-list; intended only for the closed test channel."""
-        from sqlalchemy import select
+        When vision moderation is disabled (require_vision=False), the vision-ok requirement is
+        dropped — media attaches on the reuse check alone — but an explicit media_vision_block
+        already on record is still honoured. NOTE: this relaxes the charter media stop-list;
+        intended only for the closed test channel."""
+        from sqlalchemy import and_, or_, select
 
-        from newsroom.publishers.cascade import MediaItem, choose_media
+        from newsroom.publishers.cascade import MediaItem
 
         if event_id is None:
-            return None
+            return []
         from newsroom.models import Decision, EventItem, Item, MediaAsset
 
         decisions = set(s.execute(
@@ -312,9 +300,7 @@ class Publisher:
         else:
             vision_ok = not vision_blocked          # attach without a vision verdict
         if not (reuse_ok and vision_ok):
-            return None
-
-        from sqlalchemy import and_, or_
+            return []
 
         rows = s.execute(
             select(MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes,
@@ -324,10 +310,57 @@ class Publisher:
             .where(EventItem.event_id == event_id,
                    or_(MediaAsset.url.is_not(None),
                        and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))))
+            .order_by(MediaAsset.id)
         ).all()
-        items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb, storage_key=sk)
-                 for k, u, w, sb, sk in rows]
-        return choose_media(items)
+        return [MediaItem(kind=k, url=u, width=w, size_bytes=sb, storage_key=sk)
+                for k, u, w, sb, sk in rows]
+
+    def _media_choice(self, s, event_id):
+        """The single best media to attach (video → widest image → none)."""
+        from newsroom.publishers.cascade import choose_media
+
+        return choose_media(self._eligible_media_items(s, event_id))
+
+    def _group_attachments(self, choices) -> dict:
+        """{index: (filename, bytes)} for group items whose local bytes we can upload (preferred
+        over a URL Telegram may not fetch). A url-only item is left for URL-send."""
+        out: dict[int, tuple[str, bytes]] = {}
+        for idx, ch in enumerate(choices):
+            f = self._media_file(ch)
+            if f is not None:
+                out[idx] = f
+        return out
+
+    def _send_with_media(self, body, media_items, *, reply_to_message_id, publication_id):
+        """Send the post with its media. An ALBUM (sendMediaGroup) when 2+ eligible media and
+        the body fits a caption; else the single-media cascade (video → widest image → text).
+        Every path falls back so a bad image/album never loses the post. Prefers uploading local
+        bytes over a URL (Telegram often can't fetch a source URL). Returns a PublishResult."""
+        from newsroom.publishers.cascade import choose_media, choose_media_group
+        from newsroom.publishers.telegram import TELEGRAM_CAPTION_LEN
+
+        group = choose_media_group(media_items)
+        if len(group) >= 2 and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
+            attachments = self._group_attachments(group)
+            result = self.telegram.send_media_group(
+                group, body, reply_to_message_id=reply_to_message_id, attachments=attachments)
+            if result.ok:
+                return result
+            log.warning("album send failed; falling back to single media",
+                        extra={"publication_id_": publication_id, "error": result.error})
+
+        media_choice = choose_media(media_items)
+        media_file = self._media_file(media_choice) if media_choice is not None else None
+        if media_choice is not None and media_file is None and not media_choice.url:
+            media_choice = None                     # no fetchable URL and no local file -> drop it
+        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id,
+                                         file=media_file)
+        if not result.ok and media_choice is not None:
+            # a post must never be lost to a bad image — retry once as text only
+            log.warning("media send failed; retrying as text",
+                        extra={"publication_id_": publication_id, "error": result.error})
+            result = self.telegram.send_post(body, None, reply_to_message_id=reply_to_message_id)
+        return result
 
     def _media_file(self, choice):
         """Read the choice's locally stored bytes for upload (filename, bytes), or None

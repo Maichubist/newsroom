@@ -245,6 +245,86 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
     assert p3.calls[0][0] == "sendPhoto" and p3.calls[0][1]["photo"] == "http://x/pic.jpg"
 
 
+def _seed_two_image_event(pg_engine, *, tag):
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url=f"https://al/{tag}", name="AL", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id=f"al{tag}", content_hash=f"al{tag}".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/a.jpg", width=1200))
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/b.jpg", width=1000))
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
+                   first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"))
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="Заголовок", body="Коротка новина.",
+                          features={"critic_ok": True, "is_rumor": False})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+        return pid
+
+
+class _AlbumPoster:
+    def __init__(self, *, group_ok=True):
+        self.calls = []
+        self._group_ok = group_ok
+
+    def __call__(self, method, payload):
+        self.calls.append((method, payload))
+        if method == "sendMediaGroup":
+            if not self._group_ok:
+                return {"ok": False, "description": "album failed"}
+            return {"ok": True, "result": [{"message_id": 700}, {"message_id": 701}]}
+        return {"ok": True, "result": {"message_id": 500 + len(self.calls)}}
+
+
+def test_publish_sends_album_for_multiple_images(pg_engine):
+    import json as _json
+
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    sf = make_session_factory(pg_engine)
+    pid = _seed_two_image_event(pg_engine, tag=1)
+    poster = _AlbumPoster()
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    assert Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS).publish_one(pid).published is True
+
+    method, payload = poster.calls[0]
+    assert method == "sendMediaGroup"
+    media = _json.loads(payload["media"])
+    assert len(media) == 2 and {m["media"] for m in media} == {"http://x/a.jpg", "http://x/b.jpg"}
+    with Session(pg_engine) as s:
+        p = s.get(Publication, pid)
+        assert p.status == "published" and p.channel_ref == "700"   # first album message id
+
+
+def test_publish_album_failure_falls_back_to_single(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+
+    sf = make_session_factory(pg_engine)
+    pid = _seed_two_image_event(pg_engine, tag=2)
+    poster = _AlbumPoster(group_ok=False)          # album rejected -> must fall back
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    assert Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS).publish_one(pid).published is True
+
+    methods = [m for m, _ in poster.calls]
+    assert methods[0] == "sendMediaGroup" and "sendPhoto" in methods   # fell back to a single photo
+    with Session(pg_engine) as s:
+        assert s.get(Publication, pid).status == "published"
+
+
 class FakeStore:
     """In-memory store: serves seeded bytes and records deletes."""
 

@@ -365,7 +365,11 @@ def dedup_new_events(session_factory, dedup: "IngestDedup", *, enforce: bool = F
 
     stats = {"checked": 0, "merged": 0, "items_moved": 0, "unresolved": 0}
     for event_id in ids:
-        verdict = dedup.check(event_id)
+        try:
+            verdict = dedup.check(event_id)
+        except Exception as exc:  # noqa: BLE001 — one bad event must not abort the whole tick
+            log.warning("ingest dedup check failed", extra={"event_id": event_id, "error": str(exc)})
+            verdict = MergeVerdict(action=MERGE_UNRESOLVED, mode="error", reason=str(exc)[:200])
         stats["checked"] += 1
         if verdict.action == MERGE_UNRESOLVED:
             stats["unresolved"] += 1

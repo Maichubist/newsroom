@@ -220,7 +220,7 @@ def report_subscriptions(session_factory, *, limit: int = 15) -> str:
             .where(Source.kind == "telegram").order_by(Source.created_at.desc()).limit(limit)
         ).all()
     head = (f"Підписки Telegram: всього {total}, активних {active}\n"
-            f"(авто-синк додає нові підписки акаунта; збиратись починають після рестарту)")
+            f"(авто-синк додає нові підписки акаунта й підхоплює їх наживо, без рестарту)")
     if not recent:
         return _pre(html.escape(head + "\n\nЩе нема ТГ-джерел."))
     data = [[(name or "")[:26], handle[:22], "✓" if act else "—"] for name, handle, act, _at in recent]

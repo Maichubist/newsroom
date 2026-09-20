@@ -636,13 +636,37 @@ async def media_download_forever(session_factory, downloader, *, tick_seconds: f
         await asyncio.sleep(tick_seconds)
 
 
+async def media_purge_forever(session_factory, *, tick_seconds: float = 3600.0,
+                              older_than_hours: int = 48,
+                              stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+    """Periodically delete local media files that will never be (re)published (stored, old,
+    not tied to an in-flight post). The post-publish purge only cleans what actually
+    publishes; most collected media belongs to events that never post, so without this the
+    store grows unbounded. pHash stays in the DB, so dropping files is safe."""
+    from newsroom.media import LocalMediaStore, purge_stale_media
+
+    store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
+    while not (stop and stop.is_set()):
+        try:
+            removed = await asyncio.to_thread(purge_stale_media, session_factory, store,
+                                              older_than_hours=older_than_hours)
+            if removed:
+                log.info("stale media purge tick", extra=bind(removed=removed))
+        except Exception:
+            log.exception("stale media purge tick failed")
+        await asyncio.sleep(tick_seconds)
+
+
 def build_tg_media_downloader_from_env(session_factory):  # pragma: no cover — Pillow
     """Assemble the Telegram media downloader (local store + Pillow decoder). Fetch is
     via the collector's live Telethon client, passed in at loop time."""
     from newsroom.media import LocalMediaStore, PillowDecoder, TelegramMediaDownloader
 
     store_dir = os.getenv("MEDIA_STORE_DIR", "./media")
-    return TelegramMediaDownloader(session_factory, store=LocalMediaStore(store_dir), decoder=PillowDecoder())
+    # 50MB so Telegram videos (uploaded multipart, Bot API limit 50MB) download too, not just
+    # the 25MB default — TG video was mostly skipped at download before.
+    return TelegramMediaDownloader(session_factory, store=LocalMediaStore(store_dir),
+                                   decoder=PillowDecoder(), max_bytes=50 * 1024 * 1024)
 
 
 async def tg_media_download_forever(session_factory, collector, downloader, *, tick_seconds: float = 45.0,
@@ -736,9 +760,9 @@ async def monitoring_forever(session_factory, *, tick_seconds: float = 120.0,
 async def subscriptions_sync_forever(session_factory, collector, *, tick_seconds: float = 900.0,
                                      stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Auto-register the reading account's channel subscriptions as telegram sources via the
-    shared Telethon session, so new subscriptions are picked up without editing sources.yaml.
-    A newly-added channel is only COLLECTED after the next restart (realtime handlers are
-    registered at start); this keeps the source list in sync. Slow cadence, reads only."""
+    shared Telethon session, then LIVE-subscribe them: refresh the collector's source map and
+    backfill the new channels, so a newly-added subscription starts collecting WITHOUT a
+    restart (the realtime handlers listen to all chats and filter by the live map). Slow cadence."""
     from newsroom.sources.discovery import list_subscribed_channels, sync_subscriptions
 
     client = await collector.wait_client()
@@ -746,8 +770,10 @@ async def subscriptions_sync_forever(session_factory, collector, *, tick_seconds
         try:
             channels = await list_subscribed_channels(client)
             stats = await asyncio.to_thread(sync_subscriptions, session_factory, channels)
-            if stats.get("added"):
-                log.info("subscriptions synced", extra=bind(**stats))
+            # pick up newly-added (or manually-added) sources live: refresh the map + backfill
+            backfilled = await collector.sync_and_backfill_new(client)
+            if stats.get("added") or backfilled:
+                log.info("subscriptions synced", extra=bind(backfilled=backfilled, **stats))
         except Exception:
             log.exception("subscription sync failed")
         await asyncio.sleep(tick_seconds)
@@ -945,6 +971,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
             tasks.append(asyncio.create_task(
                 tg_media_download_forever(session_factory, telegram_collector, tg_downloader)))
             log.info("telegram media download enabled")
+        # Sweep stale local media (most collected media never publishes, so post-publish
+        # purge alone lets the store grow forever). Gated by the same purge flag.
+        purge = os.getenv("MEDIA_PURGE_AFTER_PUBLISH", "true").strip().lower() in {"1", "true", "yes"}
+        if purge:
+            tasks.append(asyncio.create_task(media_purge_forever(session_factory)))
+            log.info("stale media purge enabled")
     else:
         log.info("media download disabled (MEDIA_DOWNLOAD_ENABLED off)")
 

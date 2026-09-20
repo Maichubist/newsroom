@@ -168,3 +168,58 @@ def test_download_skips_oversized(pg_engine, tmp_path):
     assert result.skipped and not result.stored
     with Session(pg_engine) as s:
         assert s.get(MediaAsset, mid).storage_key is None
+
+
+# --- purge_stale_media (pg) ----------------------------------------------------
+
+class _RecordingStore:
+    def __init__(self):
+        self.deleted: list[str] = []
+
+    def delete(self, key):
+        self.deleted.append(key)
+        return True
+
+
+@pytest.mark.pg
+def test_purge_stale_media_removes_only_old_unpublished(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.media.purge import purge_stale_media
+    from newsroom.models import (
+        Event, EventItem, Item, MediaAsset, Publication, Source,
+    )
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(UTC)
+    old = now - dt.timedelta(hours=72)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://p/f", name="P", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="i1", content_hash="c1".ljust(64, "0"), status="clustered")
+        it_pending = Item(source_id=src.id, external_id="i2", content_hash="c2".ljust(64, "0"), status="clustered")
+        s.add_all([it, it_pending])
+        s.flush()
+        old_asset = MediaAsset(item_id=it.id, kind="image", storage_key="aa/old", first_seen_at=old)
+        new_asset = MediaAsset(item_id=it.id, kind="image", storage_key="bb/new", first_seen_at=now)
+        # old media, but its event has an in-flight draft -> must be kept
+        pending_asset = MediaAsset(item_id=it_pending.id, kind="image", storage_key="cc/pending", first_seen_at=old)
+        s.add_all([old_asset, new_asset, pending_asset])
+        ev = Event(status="confirmed", title="e", first_seen_at=old)
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it_pending.id))
+        s.add(Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="h", body="b", features={"critic_ok": True}))
+        s.flush()
+        old_id, new_id, pending_id = old_asset.id, new_asset.id, pending_asset.id
+        s.commit()
+
+    store = _RecordingStore()
+    removed = purge_stale_media(sf, store, older_than_hours=48)
+
+    assert removed == 1 and store.deleted == ["aa/old"]
+    with Session(pg_engine) as s:
+        assert s.get(MediaAsset, old_id).purged_at is not None      # old, unpublished -> purged
+        assert s.get(MediaAsset, new_id).purged_at is None          # too recent -> kept
+        assert s.get(MediaAsset, pending_id).purged_at is None      # in-flight draft -> kept

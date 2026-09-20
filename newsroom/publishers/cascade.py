@@ -13,9 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Telegram limits for media sent by URL.
+# Telegram Bot API media limits. Photo-by-URL is ~5MB. Video is UPLOADED (multipart) for
+# Telegram-origin media, where the Bot API allows up to 50MB — so we cap at 50MB, not the
+# 20MB URL-send limit (a rare URL-only video over 20MB just fails the send and falls back to
+# text). This is why 20-50MB Telegram videos previously downloaded but never attached.
 PHOTO_MAX_BYTES = 5 * 1024 * 1024
-VIDEO_MAX_BYTES = 20 * 1024 * 1024
+VIDEO_MAX_BYTES = 50 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -82,3 +85,43 @@ def choose_media(items: list[MediaItem], limits: MediaLimits | None = None) -> M
 def _wide_enough(width: int | None, min_width: int) -> bool:
     # unknown width: allow (Telegram fetches it); known but tiny: reject as a logo/icon
     return width is None or width >= min_width
+
+
+# Telegram sendMediaGroup allows 2-10 items; photos and videos can be mixed.
+MEDIA_GROUP_MIN = 2
+MEDIA_GROUP_MAX = 10
+
+
+def _as_choice(i: "MediaItem") -> MediaChoice:
+    if i.kind == "video":
+        return MediaChoice(method="sendVideo", param="video", url=i.url, storage_key=i.storage_key)
+    return MediaChoice(method="sendPhoto", param="photo", url=i.url, storage_key=i.storage_key)
+
+
+def choose_media_group(items: list[MediaItem], limits: MediaLimits | None = None,
+                       *, max_group: int = MEDIA_GROUP_MAX) -> list[MediaChoice]:
+    """Pick up to `max_group` sendable media for an album (sendMediaGroup), in order, deduped
+    by url/file. Same eligibility as the single cascade — videos within the video limit,
+    images within the photo limit and wide enough; embeds skipped. Returns [] / [one] / [2..10];
+    the caller sends a single item normally and only 2+ as a group."""
+    limits = limits or MediaLimits()
+    out: list[MediaChoice] = []
+    seen: set[str] = set()
+    for i in items:
+        if not _sendable(i):
+            continue
+        key = i.storage_key or i.url or ""
+        if key in seen:
+            continue
+        if i.kind == "video" and _within(i.size_bytes, limits.video_max_bytes):
+            pass
+        elif (i.kind == "image" and _within(i.size_bytes, limits.photo_max_bytes)
+              and _wide_enough(i.width, limits.min_image_width)):
+            pass
+        else:
+            continue
+        out.append(_as_choice(i))
+        seen.add(key)
+        if len(out) >= max_group:
+            break
+    return out
