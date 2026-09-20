@@ -24,13 +24,14 @@ from newsroom.editorial.dedup import (
     parse_groups,
 )
 from newsroom.editorial.digest import (
+    DigestCategory,
     DigestConfig,
     compose_digest,
+    digest_category,
     due_windows,
-    is_attack,
     load_digest_config,
     publish_due_digests,
-    reserve_attacks,
+    reserve_digests,
 )
 from newsroom.editorial.pipeline import EditorialPipeline, ProduceResult, produce_drafts
 from newsroom.editorial.updates import (
@@ -57,9 +58,9 @@ __all__ = [
     "must_publish", "parse_ranking", "CURATE_PUBLISH", "CURATE_HOLD",
     # LLM batch dedup
     "DedupGrouper", "LLMDedupGrouper", "dedup_pending", "parse_groups",
-    # attacks digest
-    "DigestConfig", "load_digest_config", "is_attack", "compose_digest",
-    "due_windows", "reserve_attacks", "publish_due_digests",
+    # digests (attacks + routine noise buckets)
+    "DigestConfig", "DigestCategory", "load_digest_config", "digest_category", "compose_digest",
+    "due_windows", "reserve_digests", "publish_due_digests",
     # story updates (§7, §8.5)
     "UpdateDecision", "UpdateResult", "UpdateClassifier", "LLMUpdateClassifier",
     "StoryUpdater", "classify_pending", "parse_update", "route_update",

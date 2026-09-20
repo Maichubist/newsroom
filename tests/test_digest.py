@@ -10,10 +10,10 @@ from sqlalchemy.orm import Session
 from newsroom.editorial.digest import (
     _attack_blob,
     compose_digest,
+    digest_category,
     due_windows,
-    is_attack,
     load_digest_config,
-    reserve_attacks,
+    reserve_digests,
     window_range,
 )
 
@@ -25,14 +25,23 @@ KYIV = ZoneInfo("Europe/Kyiv")
 # --- config + detection (offline) ---------------------------------------------
 
 def test_config_loads():
-    assert CFG.windows and CFG.rubrics and CFG.markers
-    assert any(w.name.startswith("Обстріли за ніч") for w in CFG.windows)
+    assert CFG.windows and CFG.categories
+    assert any(c.name == "Обстріли" for c in CFG.categories)
+    assert any(w.name == "night" for w in CFG.windows)
 
 
-def test_is_attack_needs_rubric_and_marker():
-    assert is_attack("war", "Ударний БпЛА атакував Миколаїв", CFG) is True
-    assert is_attack("war", "Зеленський підписав указ про бюджет", CFG) is False   # war but no attack marker
-    assert is_attack("economy", "Обстріл спричинив зростання цін", CFG) is False   # marker but wrong rubric
+def test_digest_category_needs_rubric_and_marker():
+    assert digest_category("war", "Ударний БпЛА атакував Миколаїв", CFG).name == "Обстріли"
+    assert digest_category("war", "Зеленський підписав указ про бюджет", CFG) is None   # war but no marker
+    assert digest_category("politics", "Уряд ухвалив бюджет", CFG) is None              # not a digest rubric
+
+
+def test_digest_category_precedence_and_new_buckets():
+    # attacks beat losses (config order = precedence), plus the new routine buckets
+    assert digest_category("war", "Росіяни втратили понад 1400 військових за добу", CFG).name == "Втрати ворога"
+    assert digest_category("law_crime", "Поліція затримала трьох підозрюваних у крадіжці", CFG).name == "Кримінальна хроніка"
+    assert digest_category("society", "На Хрещатику ДТП: зіткнулися дві автівки", CFG).name == "Місцева хроніка"
+    assert digest_category("economy", "Долар подорожчав на міжбанку", CFG).name == "Економічні брифи"
 
 
 def test_attack_blob_reads_title_and_facts():
@@ -40,8 +49,8 @@ def test_attack_blob_reads_title_and_facts():
     fb = {"facts": [{"text": "Ударний БпЛА над містом, курсом на центр"}, {"text": ""}]}
     blob = _attack_blob("⚠ Одеса", fb)
     assert "⚠ Одеса" in blob and "Ударний БпЛА" in blob
-    assert is_attack("war", blob, CFG) is True          # matched via the body...
-    assert is_attack("war", _attack_blob("⚠ Одеса", None), CFG) is False   # ...title alone would miss
+    assert digest_category("war", blob, CFG).name == "Обстріли"          # matched via the body...
+    assert digest_category("war", _attack_blob("⚠ Одеса", None), CFG) is None   # ...title alone would miss
     assert _attack_blob("t", {"facts": "not-a-list"}) == "t"               # malformed fact_base is safe
 
 
@@ -78,7 +87,7 @@ def test_due_windows_fire_after_publish_time_once():
 # --- reservation (pg) ---------------------------------------------------------
 
 @pytest.mark.pg
-def test_reserve_attacks_marks_only_attacks(pg_engine):
+def test_reserve_digests_marks_only_attacks(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Event
 
@@ -92,12 +101,12 @@ def test_reserve_attacks_marks_only_attacks(pg_engine):
         atk_id, pol_id = atk.id, pol.id
         s.commit()
 
-    assert reserve_attacks(sf, CFG)["reserved"] == 1
+    assert reserve_digests(sf, CFG)["reserved"] == 1
     with Session(pg_engine) as s:
         assert s.get(Event, atk_id).curated == "digest"    # attack reserved
         assert s.get(Event, pol_id).curated is None         # politics untouched
     # idempotent
-    assert reserve_attacks(sf, CFG)["reserved"] == 0
+    assert reserve_digests(sf, CFG)["reserved"] == 0
 
 
 @pytest.mark.pg
@@ -118,7 +127,7 @@ def test_reserve_catches_headline_less_alert_via_facts(pg_engine):
         eid = ev.id
         s.commit()
 
-    assert reserve_attacks(sf, CFG)["reserved"] == 1
+    assert reserve_digests(sf, CFG)["reserved"] == 1
     with Session(pg_engine) as s:
         assert s.get(Event, eid).curated == "digest"
 
@@ -141,6 +150,6 @@ def test_reserve_skips_already_published_attack(pg_engine):
         eid = ev.id
         s.commit()
 
-    assert reserve_attacks(sf, CFG)["reserved"] == 0        # already posted -> not folded into a digest
+    assert reserve_digests(sf, CFG)["reserved"] == 0        # already posted -> not folded into a digest
     with Session(pg_engine) as s:
         assert s.get(Event, eid).curated is None

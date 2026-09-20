@@ -61,12 +61,14 @@ class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
                  require_vision: bool = True, charter_version: str = "0.3",
-                 predup=None, predup_enforce: bool = False):
+                 predup=None, predup_enforce: bool = False, spine=None):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
         self.limits = limits
         self.supervisor = supervisor
+        # taxonomy spine (rubric -> oversight). None = old behaviour (notice on critical/rumor only).
+        self.spine = spine
         # publish-time twin check (Phase A dedup). None = off (default, existing behaviour).
         # In observe mode (predup_enforce=False) the verdict is only LOGGED, never acted on,
         # so the channel is untouched while thresholds are calibrated.
@@ -197,6 +199,7 @@ class Publisher:
                 ev = s.get(_Ev, pub.event_id) if pub.event_id else None
                 self._notify_supervisor(publication_id, headline,
                                         risk_level=(ev.risk_level if ev else None),
+                                        rubric=(ev.rubric if ev else None),
                                         is_rumor=pub_is_rumor, message_id=result.message_id)
                 self._purge_media(pub.event_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
@@ -417,12 +420,13 @@ class Publisher:
         except Exception:  # noqa: BLE001 - cleanup is best-effort
             log.exception("post-publish media purge failed")
 
-    def _notify_supervisor(self, publication_id, headline, *, risk_level, is_rumor, message_id) -> None:
+    def _notify_supervisor(self, publication_id, headline, *, risk_level, rubric, is_rumor, message_id) -> None:
         if self.supervisor is None:
             return
+        oversight = bool(self.spine.needs_oversight(rubric)) if self.spine is not None else False
         try:
             self.supervisor.notify_published(
-                headline=headline, risk_level=risk_level, is_rumor=is_rumor,
+                headline=headline, risk_level=risk_level, is_rumor=is_rumor, oversight=oversight,
                 channel_ref=str(message_id) if message_id is not None else None,
                 publication_id=publication_id,
             )

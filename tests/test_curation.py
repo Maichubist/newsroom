@@ -128,12 +128,12 @@ def test_curate_pending_passes_learned_demand_to_ranker(pg_engine):
 
 @pytest.mark.pg
 def test_attack_reserved_to_digest_beats_must_publish(pg_engine):
-    # reserve_attacks runs before curate in the tick -> a critical+official attack is
+    # reserve_digests runs before curate in the tick -> a critical+official attack is
     # reserved to the digest, NOT must-published individually.
     from pathlib import Path
 
     from newsroom.db import make_session_factory
-    from newsroom.editorial import load_digest_config, reserve_attacks
+    from newsroom.editorial import load_digest_config, reserve_digests
     from newsroom.models import Event, EventItem, Item, Source
 
     cfg = load_digest_config(Path(__file__).resolve().parents[1] / "config" / "digest.yaml")
@@ -155,7 +155,7 @@ def test_attack_reserved_to_digest_beats_must_publish(pg_engine):
         eid = ev.id
         s.commit()
 
-    reserve_attacks(sf, cfg)                       # tick step 1
+    reserve_digests(sf, cfg)                       # tick step 1
     ranker = FakeRanker({})
     curate_pending(sf, ranker, significance_threshold=0.55)   # tick step 2
     with Session(pg_engine) as s:
@@ -210,7 +210,7 @@ def test_curate_pending_refutation_bypasses_ranker_and_ranks_the_rest(pg_engine)
                       significance=0.8, first_seen_at=now)
         e_hold = Event(status="confirmed", risk_level="low", rubric="sport", title="Матч",
                        significance=0.6, first_seen_at=now)
-        # below the significance bar -> not even considered
+        # significance no longer gates: this reaches the ranker too (and is held on merit)
         e_low = Event(status="confirmed", risk_level="low", rubric="culture", title="Дрібниця",
                       significance=0.2, first_seen_at=now)
         s.add_all([e_must, e_crit, e_pub, e_hold, e_low])
@@ -223,16 +223,17 @@ def test_curate_pending_refutation_bypasses_ranker_and_ranks_the_rest(pg_engine)
         s.commit()
 
     ranker = FakeRanker({ids["crit"]: "publish", ids["pub"]: "publish", ids["hold"]: "hold"})
-    stats = curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
+    stats = curate_pending(sf, ranker, window_hours=6)
 
-    assert stats["must"] == 1 and stats["publish"] == 3 and stats["hold"] == 1
+    # e_low is now ranked too (no significance gate); the fake ranker defaults it to hold
+    assert stats["must"] == 1 and stats["publish"] == 3 and stats["hold"] == 2
     assert ids["must"] not in ranker.seen          # the refutation never reached the LLM
-    assert set(ranker.seen) == {ids["crit"], ids["pub"], ids["hold"]}   # critical is ranked now
+    assert set(ranker.seen) == {ids["crit"], ids["pub"], ids["hold"], ids["low"]}
     with Session(pg_engine) as s:
         from newsroom.models import Event
         curated = {eid: s.get(Event, eid).curated for eid in ids.values()}
         assert curated == {ids["must"]: "publish", ids["crit"]: "publish", ids["pub"]: "publish",
-                           ids["hold"]: "hold", ids["low"]: None}
+                           ids["hold"]: "hold", ids["low"]: "hold"}
 
     # idempotent: already curated -> nothing to do
-    assert curate_pending(sf, FakeRanker({}), significance_threshold=0.55)["curated"] == 0
+    assert curate_pending(sf, FakeRanker({}))["curated"] == 0

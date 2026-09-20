@@ -142,7 +142,9 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 - рутинна кримінальна хроніка й суди районного рівня (крім резонансних справ);
 - процедурні/технічні дрібниці, галузеві оголошення без наслідків для широкого читача;
 - місцевий спорт і культура без загальнонаціонального інтересу;
-- одне слабке джерело без розвитку теми.
+- одне слабке джерело без розвитку теми;
+- ПОРОЖНЯ фактична база: якщо під заголовком немає конкретних фактів (цифр, імен,
+  місць, деталей) — завжди hold. Заголовок без суті не публікуємо, хай тема й гаряча.
 Окремо: загибель КОНКРЕТНОЇ людини, невідомої широкому загалу (некролог, прощання з
 бійцем, «загинув військовий N») — hold. Гідно шани, але не масова новина, і канал не має
 ставати стрічкою некрологів. ВИНЯТОК (publish): масові втрати внаслідок удару/події або
@@ -216,10 +218,13 @@ def _facts_brief(fact_base, *, limit: int = 3) -> list[str]:
 def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_threshold: float | None = None,
                    window_hours: int = 6, limit: int = 40, require_dedup_settled: bool = False,
                    dedup_grace_seconds: float = 300.0) -> dict[str, int]:
-    """One curation tick: mark recent significant, not-yet-curated events publish/hold.
-    must-publish events are marked deterministically; the rest are ranked comparatively
-    by the LLM. Only publish-marked events are later drafted. With require_dedup_settled,
-    an event waits for the ingest-dedup verdict first (Phase B savings)."""
+    """One curation tick: mark recent, not-yet-curated events publish/hold. Selection is
+    by popularity (charter v0.3): demand × heat feed the ranker, substance (the facts
+    shown per candidate) keeps content-free events out. must-publish (refutation) events
+    are marked deterministically; the rest are ranked comparatively by the LLM. Only
+    publish-marked events are later drafted. `significance_threshold` is accepted for
+    signature stability but no longer gates — significance is retired as the interest
+    gate. With require_dedup_settled, an event waits for the ingest-dedup verdict first."""
     import datetime as dt
 
     from sqlalchemy import select
@@ -236,8 +241,10 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         Event.duplicate_of.is_(None),        # skip events marked duplicate (LLM batch dedup)
         Event.first_seen_at >= cutoff,
     ]
-    if significance_threshold is not None:
-        conditions.append(Event.significance >= significance_threshold)
+    # significance is retired as the interest gate (charter v0.3): selection is by
+    # popularity. The ranker weighs demand × heat and sees each candidate's facts, so a
+    # content-free event is held on the spot and never becomes a post (content_is_publishable
+    # is the downstream backstop). `significance_threshold` no longer filters here.
     dedup_clause = dedup_settled_clause(require_dedup_settled,
                                         now - dt.timedelta(seconds=dedup_grace_seconds))
     if dedup_clause is not None:
@@ -253,7 +260,9 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
                    Event.significance, Event.fact_base, Event.update_type)
             .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
-            .order_by(Event.significance.desc().nullslast(), Event.id).limit(limit)
+            # newest first (significance no longer orders): at scale the freshest events
+            # reach the ranker before the window's tail.
+            .order_by(Event.first_seen_at.desc(), Event.id).limit(limit)
         ).all()
         if not rows:
             return {"curated": 0, "publish": 0, "hold": 0, "must": 0}

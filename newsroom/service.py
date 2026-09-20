@@ -183,6 +183,7 @@ def build_verifier_from_env(session_factory):  # pragma: no cover — needs Open
     from newsroom.analyze.embeddings import OpenAIEmbedder
     from newsroom.analyze.risk import load_risk_matrix
     from newsroom.analyze.signal import load_filters
+    from newsroom.analyze.spine import load_spine
     from newsroom.analyze.stoplist import load_stoplist
     from newsroom.analyze.verify import Verifier
 
@@ -193,6 +194,7 @@ def build_verifier_from_env(session_factory):  # pragma: no cover — needs Open
         risk_matrix=load_risk_matrix(CONFIG_DIR / "risk.yaml"),
         filters=load_filters(CONFIG_DIR / "filters.yaml"),
         stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
+        spine=load_spine(CONFIG_DIR / "taxonomy_spine.yaml"),
     )
 
 
@@ -458,13 +460,13 @@ async def curation_forever(session_factory, ranker, *, grouper=None, digest_conf
     incrementally, so re-sending ~80 titles to the LLM every 2 min was mostly wasted work.
     It stays as slow background insurance for anything they miss. Reserve still runs every
     tick so an attack is caught before curation can must-publish it."""
-    from newsroom.editorial import curate_pending, dedup_pending, reserve_attacks
+    from newsroom.editorial import curate_pending, dedup_pending, reserve_digests
 
     ticks = 0
     while not (stop and stop.is_set()):
         try:
             if digest_config is not None:
-                rstats = await asyncio.to_thread(reserve_attacks, session_factory, digest_config)
+                rstats = await asyncio.to_thread(reserve_digests, session_factory, digest_config)
                 if rstats.get("reserved"):
                     log.info("digest reserve tick", extra=bind(**rstats))
             if grouper is not None and ticks % max(1, dedup_every) == 0:
@@ -487,12 +489,12 @@ async def digest_forever(session_factory, publisher, *, tick_seconds: float = 30
                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Reserve attack events and, at each window's publish time (Kyiv), post one
     combined 'Обстріли за ніч/день' digest instead of many individual posts."""
-    from newsroom.editorial import load_digest_config, publish_due_digests, reserve_attacks
+    from newsroom.editorial import load_digest_config, publish_due_digests, reserve_digests
 
     config = load_digest_config(CONFIG_DIR / "digest.yaml")
     while not (stop and stop.is_set()):
         try:
-            await asyncio.to_thread(reserve_attacks, session_factory, config)
+            await asyncio.to_thread(reserve_digests, session_factory, config)
             stats = await asyncio.to_thread(publish_due_digests, session_factory, config, publisher)
             if stats.get("digests"):
                 log.info("digest tick", extra=bind(**stats))
@@ -554,6 +556,14 @@ def build_publisher_from_env(session_factory):
     else:
         log.info("publish-time dedup disabled (PREPUBLISH_DEDUP_ENABLED off)")
 
+    # Taxonomy spine (charter v0.3): rubric -> oversight, so the supervisor is notified for
+    # the confirmed overseen set (war/defense/security/mobilization/politics/geopolitics/
+    # corruption), not just risk_level==critical. Corruption especially — a speculative
+    # info-attack vector — must reach a human before it stands.
+    from newsroom.analyze.spine import load_spine
+
+    spine = load_spine(CONFIG_DIR / "taxonomy_spine.yaml")
+
     # When vision moderation is off, don't require a vision verdict to attach media —
     # otherwise no media could ever attach. The reuse (pHash) check still gates.
     return Publisher(
@@ -567,6 +577,7 @@ def build_publisher_from_env(session_factory):
         require_vision=media_moderation_enabled(),
         predup=predup,
         predup_enforce=prepublish_dedup_enforce(),
+        spine=spine,
     )
 
 
