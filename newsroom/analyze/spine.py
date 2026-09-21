@@ -128,3 +128,59 @@ def load_spine(path: str | Path) -> Spine:
                                     oversight=oversight, aliases=tuple(norm_aliases))
 
     return Spine(rubrics=rubrics, alias_index=alias_index, default_floor=default_floor)
+
+
+# --- semi-automatic evolution: propose spine changes, a human ratifies --------
+# The spine is stable POLICY; it does not auto-recluster. But the pyramid beneath it is
+# dynamic, so the system WATCHES for two signals that the spine should change and surfaces
+# them (admin /spine) for a human to approve — it never edits the spine itself.
+
+@dataclass(frozen=True)
+class SpineProposal:
+    kind: str          # "add" (a topic maps to nothing) | "cold" (a rubric has no events)
+    topic: str         # the unmapped rubric, or the cold spine slug
+    count: int
+    detail: str
+
+
+def spine_proposals(rubric_counts: dict[str, int], spine: Spine, *, min_events: int = 20,
+                    cold_min_total: int = 200) -> list[SpineProposal]:
+    """Pure: from {rubric -> event count} propose spine changes. (1) A rubric with volume
+    that maps to NO spine rubric -> propose adding a rubric or alias. (2) Only once there is
+    enough data overall, a spine rubric that drew ZERO events -> propose review/merge. The
+    human decides; this never mutates the spine."""
+    proposals: list[SpineProposal] = []
+    for rubric, n in sorted(rubric_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= min_events and spine.resolve(rubric) is None:
+            proposals.append(SpineProposal("add", rubric, int(n), "не мапиться на жодну рубрику"))
+
+    total = sum(rubric_counts.values())
+    if total >= cold_min_total:
+        per_slug: dict[str, int] = {slug: 0 for slug in spine.rubrics}
+        for rubric, n in rubric_counts.items():
+            slug = spine.resolve(rubric)
+            if slug:
+                per_slug[slug] += int(n)
+        for slug in spine.rubrics:            # config order, stable output
+            if per_slug[slug] == 0:
+                proposals.append(SpineProposal("cold", slug, 0, "нема подій — розглянь злиття/перегляд"))
+    return proposals
+
+
+def propose_spine_changes(session, spine: Spine, *, window_days: int = 14,
+                          min_events: int = 20) -> list[SpineProposal]:
+    """Count recent events per rubric and hand them to spine_proposals. Read-only."""
+    import datetime as dt
+
+    from sqlalchemy import func, select
+
+    from newsroom.models import Event
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=window_days)
+    rows = session.execute(
+        select(Event.rubric, func.count(Event.id))
+        .where(Event.first_seen_at >= cutoff, Event.rubric.is_not(None), Event.duplicate_of.is_(None))
+        .group_by(Event.rubric)
+    ).all()
+    counts = {str(r): int(n) for r, n in rows if r}
+    return spine_proposals(counts, spine, min_events=min_events)

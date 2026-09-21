@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from newsroom.analyze.spine import SpineConfigError, load_spine
+from newsroom.analyze.spine import SpineConfigError, load_spine, spine_proposals
 
 CONFIG = Path(__file__).resolve().parents[1] / "config" / "taxonomy_spine.yaml"
 
@@ -153,3 +153,54 @@ def test_empty_rubrics_rejected(tmp_path):
     p = _write(tmp_path, "rubrics: []\n")
     with pytest.raises(SpineConfigError):
         load_spine(p)
+
+
+# --- semi-automatic evolution proposals (offline) -----------------------------
+
+def test_spine_proposals_flags_unmapped_high_volume():
+    s = load_spine(CONFIG)
+    props = spine_proposals({"war": 100, "новамегатема": 40, "дрібнинова": 5}, s, min_events=20)
+    adds = [p for p in props if p.kind == "add"]
+    assert any(p.topic == "новамегатема" and p.count == 40 for p in adds)
+    assert not any(p.topic == "war" for p in adds)          # war maps to a rubric -> not proposed
+    assert not any(p.topic == "дрібнинова" for p in adds)   # below min_events -> not proposed
+
+
+def test_spine_proposals_cold_only_with_enough_data():
+    s = load_spine(CONFIG)
+    # not enough total data -> no cold proposals (a fresh deploy must not flag everything)
+    assert [p for p in spine_proposals({"war": 50}, s) if p.kind == "cold"] == []
+    # enough data, only war drew events -> the other 13 rubrics are cold candidates
+    cold = [p.topic for p in spine_proposals({"war": 300}, s) if p.kind == "cold"]
+    assert "war" not in cold and "sport" in cold and len(cold) == 13
+
+
+def test_admin_spine_command_dispatches():
+    from newsroom.publishers.admin import AdminConsole
+
+    # spine=None short-circuits before any DB use, so a dummy session_factory is fine
+    console = AdminConsole(lambda: None, spine=None)
+    assert "не завантажено" in console.handle("/spine")
+
+
+@pytest.mark.pg
+def test_propose_spine_changes_reads_events(pg_engine):
+    import datetime as dt
+
+    from sqlalchemy.orm import Session
+
+    from newsroom.analyze.spine import propose_spine_changes
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        for i in range(25):
+            s.add(Event(status="confirmed", rubric="загадковатема", title=f"t{i}", first_seen_at=now))
+        s.add(Event(status="confirmed", rubric="war", title="w", first_seen_at=now))
+        s.commit()
+    spine = load_spine(CONFIG)
+    with sf() as s:
+        props = propose_spine_changes(s, spine, min_events=20)
+    assert any(p.kind == "add" and p.topic == "загадковатема" and p.count == 25 for p in props)

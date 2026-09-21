@@ -1130,7 +1130,8 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
             except (TypeError, ValueError):
                 admin_user_id = None
             bot = SupervisionBot(session_factory, publisher.telegram, admin_chat_id=admin_id,
-                                 admin_user_id=admin_user_id, console=AdminConsole(session_factory))
+                                 admin_user_id=admin_user_id,
+                                 console=AdminConsole(session_factory, spine=publisher.spine))
             tasks.append(asyncio.create_task(bot.poll_forever()))
             log.info("supervision bot + admin console enabled")
         if digest_enabled():
