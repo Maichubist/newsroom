@@ -228,6 +228,32 @@ class TelegramPublisher:
                                    reply_to_message_id=reply_to_message_id, file=file)
         return self.send_text(body, chat_id=chat_id, reply_to_message_id=reply_to_message_id)
 
+    def edit_text(self, text: str, *, chat_id: int | None, message_id: int,
+                  disable_preview: bool = True) -> PublishResult:
+        """Edit a previously published TEXT message (editMessageText) — used to upgrade a
+        live post when a richer version of the same event arrives. Gated by the stop button
+        (unlike delete, an edit is a content change, not a safety action). No split: an edit
+        targets ONE message, so text over the limit is refused and the caller keeps the
+        original. editMessageText fails on a media message (photo/album) — the caller treats
+        that as 'not enriched' and moves on."""
+        if not self.is_enabled():
+            return PublishResult(False, error="publishing disabled (PUBLISH_ENABLED off or no credentials)")
+        target = chat_id if chat_id is not None else self.active_chat_id
+        text = (text or "").strip()
+        if not text:
+            return PublishResult(False, error="empty text")
+        if len(text) > self.max_len:
+            return PublishResult(False, error="text too long to edit into one message")
+        resp = self._poster("editMessageText", {
+            "chat_id": target, "message_id": message_id, "text": text,
+            "parse_mode": "HTML", "disable_web_page_preview": disable_preview,
+        })
+        if not resp.get("ok"):
+            err = resp.get("description") or resp.get("error") or str(resp)
+            log.warning("telegram edit failed", extra={"error": err})
+            return PublishResult(False, error=str(err))
+        return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id", message_id))
+
     def delete_message(self, chat_id: int | None, message_id: int) -> bool:
         """Delete a channel message (used to retract a post). No enable gate: a
         retract must work even while publishing is halted."""

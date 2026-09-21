@@ -37,6 +37,14 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+def _fact_count(fact_base) -> int:
+    """Number of non-empty facts in a fact base — the 'richness' measure that decides
+    whether a duplicate is worth upgrading the live post to."""
+    if not isinstance(fact_base, dict):
+        return 0
+    return sum(1 for f in (fact_base.get("facts") or []) if isinstance(f, dict) and f.get("text"))
+
+
 def _render_send_body(pub) -> str:
     """The text actually sent to Telegram: HTML rendered from the stored pieces
     (bold headline, linked sources) when present, else the plain pub.body. Gate
@@ -61,7 +69,8 @@ class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
                  require_vision: bool = True, charter_version: str = "0.3",
-                 predup=None, predup_enforce: bool = False, spine=None):
+                 predup=None, predup_enforce: bool = False, spine=None,
+                 enrich_on_duplicate: bool = False):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
@@ -69,6 +78,9 @@ class Publisher:
         self.supervisor = supervisor
         # taxonomy spine (rubric -> oversight). None = old behaviour (notice on critical/rumor only).
         self.spine = spine
+        # when a richer duplicate arrives, upgrade the already-published post in place
+        # (editMessageText) instead of just dropping it. Only acts in predup ENFORCE.
+        self.enrich_on_duplicate = bool(enrich_on_duplicate)
         # publish-time twin check (Phase A dedup). None = off (default, existing behaviour).
         # In observe mode (predup_enforce=False) the verdict is only LOGGED, never acted on,
         # so the channel is untouched while thresholds are calibrated.
@@ -459,6 +471,14 @@ class Publisher:
                 if action == ACTION_DUPLICATE:
                     if event is not None and verdict.canonical_event_id is not None:
                         event.duplicate_of = verdict.canonical_event_id
+                    # if this duplicate is RICHER than the already-published canonical, upgrade
+                    # the live post in place instead of silently dropping the better version.
+                    if (self.enrich_on_duplicate and pub is not None and pub.event_id is not None
+                            and verdict.canonical_event_id is not None):
+                        enriched = self._enrich_canonical(s, dup_pub=pub,
+                                                          canonical_event_id=verdict.canonical_event_id)
+                        if enriched is not None:
+                            details["enriched_publication_id"] = enriched
                     if pub is not None:
                         pub.status = "superseded"
                 elif action == ACTION_UPDATE:
@@ -495,6 +515,61 @@ class Publisher:
         if effective == ACTION_HOLD_REVIEW:
             self._notify_review(publication_id, verdict)
         return PublishOutcome(publication_id, published=False, reasons=[f"predup_{effective}"])
+
+    def _enrich_canonical(self, s, *, dup_pub, canonical_event_id: int) -> int | None:
+        """Upgrade the canonical event's live post to this richer duplicate's body via
+        editMessageText. Returns the enriched publication id, or None when nothing was done
+        (no live post / not actually richer / edit refused). Never raises — enrichment is
+        best-effort and runs inside the supersede path, so a failure must not break publish."""
+        from sqlalchemy import select
+
+        from newsroom.models import Decision, Event, Publication
+
+        try:
+            canon_pub = s.execute(
+                select(Publication).where(
+                    Publication.event_id == canonical_event_id,
+                    Publication.channel == "telegram",
+                    Publication.status == "published",
+                    Publication.channel_ref.is_not(None))
+                .order_by(Publication.published_at.desc())
+            ).scalars().first()
+            if canon_pub is None:
+                return None                       # nothing published to upgrade
+            dup_event = s.get(Event, dup_pub.event_id)
+            canon_event = s.get(Event, canonical_event_id)
+            dup_facts = _fact_count(dup_event.fact_base if dup_event else None)
+            canon_facts = _fact_count(canon_event.fact_base if canon_event else None)
+            if dup_facts <= canon_facts:
+                return None                       # not richer -> keep the existing post as is
+            try:
+                message_id = int(canon_pub.channel_ref)
+            except (TypeError, ValueError):
+                return None
+            body = _render_send_body(dup_pub)
+            result = self.telegram.edit_text(body, chat_id=None, message_id=message_id)
+            if not result.ok:
+                # a media post can't be edited as text, or the body is too long -> keep original
+                log.info("enrich edit skipped", extra={"reason": result.error, "publication_id": canon_pub.id})
+                return None
+            # reflect the upgraded content in the DB and journal it
+            canon_pub.headline = dup_pub.headline or canon_pub.headline
+            canon_pub.body = dup_pub.body or canon_pub.body
+            feats = dict(canon_pub.features or {})
+            dup_render = (dup_pub.features or {}).get("render")
+            if isinstance(dup_render, dict):
+                feats["render"] = dup_render
+            feats["enriched_from_event"] = dup_pub.event_id
+            canon_pub.features = feats
+            canon_pub.status = "edited"
+            s.add(Decision(entity_type="publication", entity_id=str(canon_pub.id), stage="publish",
+                           decision="enriched", reason="richer duplicate",
+                           details={"from_event": dup_pub.event_id, "facts": [canon_facts, dup_facts]},
+                           charter_version=self.charter_version))
+            return canon_pub.id
+        except Exception:  # noqa: BLE001 - enrichment must never break the publish path
+            log.exception("enrich canonical failed")
+            return None
 
     def _record_predup_error(self, publication_id: int, exc: Exception) -> None:
         """Journal a predup failure and alert the supervisor. The post is still sent (the

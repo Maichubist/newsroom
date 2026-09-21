@@ -124,6 +124,10 @@ def prepublish_dedup_enforce() -> bool:
     return os.getenv("PREPUBLISH_DEDUP_ENFORCE", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def prepublish_enrich_enabled() -> bool:
+    return os.getenv("PREPUBLISH_ENRICH_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def ingest_dedup_enabled() -> bool:
     return os.getenv("INGEST_DEDUP_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -580,6 +584,7 @@ def build_publisher_from_env(session_factory):
         predup=predup,
         predup_enforce=prepublish_dedup_enforce(),
         spine=spine,
+        enrich_on_duplicate=prepublish_enrich_enabled(),
     )
 
 

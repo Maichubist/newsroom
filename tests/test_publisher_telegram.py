@@ -151,3 +151,35 @@ def test_from_env(monkeypatch):
 
     monkeypatch.setenv("PUBLISH_ENABLED", "false")
     assert TelegramPublisher.from_env().is_enabled() is False
+
+
+# --- edit_text (offline) ------------------------------------------------------
+
+def test_edit_text_calls_edit_message_text():
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100, enabled=True, poster=poster)
+    r = tg.edit_text("Оновлений текст", chat_id=-100, message_id=42)
+    assert r.ok and poster.calls[0][0] == "editMessageText"
+    assert poster.calls[0][1]["message_id"] == 42
+    assert poster.calls[0][1]["text"] == "Оновлений текст" and poster.calls[0][1]["parse_mode"] == "HTML"
+
+
+def test_edit_text_refused_when_disabled():
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100, enabled=False, poster=poster)
+    assert tg.edit_text("x", chat_id=-100, message_id=1).ok is False
+    assert poster.calls == []                      # hard-off: no network
+
+
+def test_edit_text_refuses_overlong_body():
+    poster = RecordingPoster()
+    tg = TelegramPublisher("token", -100, enabled=True, poster=poster, max_len=10)
+    assert tg.edit_text("x" * 20, chat_id=-100, message_id=1).ok is False
+    assert poster.calls == []                      # an edit targets one message, no split
+
+
+def test_edit_text_reports_api_failure():
+    poster = RecordingPoster([{"ok": False, "description": "message to edit not found"}])
+    tg = TelegramPublisher("token", -100, enabled=True, poster=poster)
+    r = tg.edit_text("t", chat_id=-100, message_id=1)
+    assert r.ok is False and "not found" in (r.error or "")

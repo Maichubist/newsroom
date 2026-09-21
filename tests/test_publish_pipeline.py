@@ -1148,3 +1148,91 @@ def test_block_decision_not_duplicated_on_repeat(pg_engine):
     with Session(pg_engine) as s:
         assert s.scalar(select(func.count()).select_from(Decision)
                         .where(Decision.entity_id == str(pid))) == 1
+
+
+# --- enrich-on-duplicate: upgrade the live post to a richer duplicate ----------
+
+def _enrich_setup(pg_engine, *, canon_facts, dup_facts):
+    from newsroom.models import Event, Publication
+
+    now = dt.datetime.now(UTC)
+    with Session(pg_engine) as s:
+        canon = Event(status="confirmed", risk_level="low", rubric="economy", title="Курс",
+                      fact_base={"facts": [{"text": f"c{i}"} for i in range(canon_facts)]}, first_seen_at=now)
+        dup = Event(status="confirmed", risk_level="low", rubric="economy", title="Курс детальніше",
+                    fact_base={"facts": [{"text": f"d{i}"} for i in range(dup_facts)]}, first_seen_at=now)
+        s.add_all([canon, dup])
+        s.flush()
+        canon_pub = Publication(event_id=canon.id, channel="telegram", kind="post", status="published",
+                                headline="Стара", body="Стара новина.", channel_ref="777",
+                                published_at=now, features={"critic_ok": True})
+        dup_pub = Publication(event_id=dup.id, channel="telegram", kind="post", status="draft",
+                              headline="Нова", body="Новина з деталями.", features={"critic_ok": True})
+        s.add_all([canon_pub, dup_pub])
+        s.flush()
+        ids = {"canon": canon.id, "dup": dup.id, "canon_pub": canon_pub.id, "dup_pub": dup_pub.id}
+        s.commit()
+    return ids
+
+
+def test_enrich_upgrades_live_post_on_richer_duplicate(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, Publication
+    from newsroom.publishers.predup import ACTION_DUPLICATE, TwinVerdict
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    ids = _enrich_setup(pg_engine, canon_facts=1, dup_facts=2)   # duplicate is richer
+
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS,
+                          predup_enforce=True, enrich_on_duplicate=True)
+    outcome = publisher._apply_predup(ids["dup_pub"], TwinVerdict(action=ACTION_DUPLICATE, mode="llm",
+                                                                  canonical_event_id=ids["canon"]))
+    assert outcome is not None and not outcome.published        # duplicate: not sent as a new post
+    edits = [p for m, p in poster.calls if m == "editMessageText"]
+    assert len(edits) == 1 and edits[0]["message_id"] == 777 and "Новина з деталями" in edits[0]["text"]
+    with Session(pg_engine) as s:
+        canon_pub = s.get(Publication, ids["canon_pub"])
+        assert canon_pub.status == "edited" and canon_pub.body == "Новина з деталями."
+        assert s.get(Publication, ids["dup_pub"]).status == "superseded"
+        assert s.get(Event, ids["dup"]).duplicate_of == ids["canon"]
+
+
+def test_enrich_skips_when_duplicate_not_richer(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+    from newsroom.publishers.predup import ACTION_DUPLICATE, TwinVerdict
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    ids = _enrich_setup(pg_engine, canon_facts=2, dup_facts=2)   # NOT richer
+
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS,
+                          predup_enforce=True, enrich_on_duplicate=True)
+    publisher._apply_predup(ids["dup_pub"], TwinVerdict(action=ACTION_DUPLICATE, mode="llm",
+                                                        canonical_event_id=ids["canon"]))
+    assert [m for m, _ in poster.calls if m == "editMessageText"] == []   # no upgrade
+    with Session(pg_engine) as s:
+        assert s.get(Publication, ids["canon_pub"]).status == "published"  # live post untouched
+        assert s.get(Publication, ids["dup_pub"]).status == "superseded"   # dup still dropped
+
+
+def test_enrich_off_by_default_leaves_live_post(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Publication
+    from newsroom.publishers.predup import ACTION_DUPLICATE, TwinVerdict
+
+    sf = make_session_factory(pg_engine)
+    poster = RecordingPoster()
+    ids = _enrich_setup(pg_engine, canon_facts=1, dup_facts=2)
+
+    tg = TelegramPublisher("token", -100500, enabled=True, poster=poster)
+    publisher = Publisher(sf, telegram=tg, stoplist_rules=STOP, limits=LIMITS,
+                          predup_enforce=True)                  # enrich_on_duplicate default False
+    publisher._apply_predup(ids["dup_pub"], TwinVerdict(action=ACTION_DUPLICATE, mode="llm",
+                                                        canonical_event_id=ids["canon"]))
+    assert [m for m, _ in poster.calls if m == "editMessageText"] == []
+    with Session(pg_engine) as s:
+        assert s.get(Publication, ids["canon_pub"]).status == "published"
