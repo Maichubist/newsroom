@@ -187,6 +187,40 @@ def test_node_heat_reflects_engagement_and_refresh_persists(pg_engine):
 
 
 @pytest.mark.pg
+def test_node_demand_computed_and_l2_signals_load(pg_engine):
+    # demand is engagement-only (no recency); curation reads (heat, demand) from the L2 node
+    from newsroom.analyze.taxonomy import load_event_signals
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, TaxonomyNode
+
+    sf = make_session_factory(pg_engine)
+    with sf() as s:
+        hot = ingest_path(s, ["технології", "пристрої", "смартфон"])
+        cold = ingest_path(s, ["технології", "пристрої", "ноутбук"])
+        s.commit()
+    _competitor_event(sf, hot, subs=1000, reacts=200, forwards=50, age_min=5)
+    _competitor_event(sf, cold, subs=1000, reacts=2, forwards=0, age_min=5)
+
+    with sf() as s:
+        result = compute_node_heat(s, window_hours=24, halflife_hours=3.0)
+    # within the leaf depth level, the high-engagement leaf beats the low-engagement one
+    assert result[hot]["demand"] == 1.0 and result[cold]["demand"] == 0.0
+
+    refresh_taxonomy_heat(sf)
+    with sf() as s:
+        l2 = s.get(TaxonomyNode, s.get(TaxonomyNode, hot).parent_id)   # "пристрої" (depth 1)
+        ev = Event(status="confirmed", rubric="tech_science", title="t", topic_leaf_id=hot,
+                   first_seen_at=dt.datetime.now(dt.timezone.utc))
+        s.add(ev)
+        s.flush()
+        sig = load_event_signals(s, [ev.id])
+        # the event's signal comes from the L2 node, NOT the leaf (leaf demand was 1.0)
+        assert sig[ev.id][0] == pytest.approx(l2.heat)
+        assert sig[ev.id][1] == pytest.approx(l2.demand)
+        assert sig[ev.id][1] != pytest.approx(result[hot]["demand"])
+
+
+@pytest.mark.pg
 def test_refresh_clears_stale_heat(pg_engine):
     from newsroom.db import make_session_factory
     from newsroom.models import Event, TaxonomyNode

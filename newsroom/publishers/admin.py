@@ -220,7 +220,7 @@ def report_subscriptions(session_factory, *, limit: int = 15) -> str:
             .where(Source.kind == "telegram").order_by(Source.created_at.desc()).limit(limit)
         ).all()
     head = (f"Підписки Telegram: всього {total}, активних {active}\n"
-            f"(авто-синк додає нові підписки акаунта; збиратись починають після рестарту)")
+            f"(авто-синк додає нові підписки акаунта й підхоплює їх наживо, без рестарту)")
     if not recent:
         return _pre(html.escape(head + "\n\nЩе нема ТГ-джерел."))
     data = [[(name or "")[:26], handle[:22], "✓" if act else "—"] for name, handle, act, _at in recent]
@@ -254,6 +254,23 @@ def report_review(session_factory, *, limit: int = 15) -> str:
     data = [[pid, eid, (h or "")[:34], (reasons.get(pid) or "")[:28]] for pid, eid, h in rows]
     return _pre("Чернетки на розгляді (можливі дублі)\n\n"
                 + _table(["pub", "event", "headline", "причина"], data))
+
+
+def report_spine(session_factory, spine=None) -> str:
+    """Semi-automatic spine evolution: topics that map to no rubric (candidates for a new
+    rubric/alias) and spine rubrics that drew no events (candidates for merge/review). The
+    human decides — this only surfaces proposals, never changes the spine."""
+    if spine is None:
+        return "Хребет таксономії не завантажено."
+    from newsroom.analyze.spine import propose_spine_changes
+
+    with session_factory() as s:
+        proposals = propose_spine_changes(s, spine)
+    if not proposals:
+        return "Хребет: пропозицій змін нема (усі теми мапляться, рубрики активні)."
+    data = [[p.kind, (p.topic or "")[:22], p.count, (p.detail or "")[:32]] for p in proposals]
+    return _pre("Пропозиції до хребта — рішення за тобою\n\n"
+                + _table(["тип", "тема", "n", "деталь"], data))
 
 
 def report_sources(session_factory, *, limit: int = 30) -> str:
@@ -369,7 +386,6 @@ def report_event(session_factory, event_id: int) -> str:
             .order_by(Decision.id)
         ).all()
     head = (f"event {event_id}: {ev.status}/{ev.risk_level or '?'}/{ev.rubric or '?'} "
-            f"sig={ev.significance if ev.significance is not None else '—'} "
             f"curated={ev.curated or '—'} dup_of={ev.duplicate_of or '—'}\n"
             f"«{(ev.title or '')[:80]}»")
     if not decisions:
@@ -389,6 +405,7 @@ HELP = (
     "/review [N] — чернетки на розгляді (можливі дублі)\n"
     "/topics [N] — гарячі теми з постів конкурентів\n"
     "/demand — індекс попиту за рубриками\n"
+    "/spine — пропозиції до хребта рубрик (додати/злити) — рішення за тобою\n"
     "/sources — джерела-конкуренти й підписники\n"
     "/subs — підписки Telegram (авто-синк нових каналів)\n"
     "/top [N] — топ постів конкурентів за залученістю\n"
@@ -412,8 +429,9 @@ def parse_command(text: str | None) -> tuple[str, str] | None:
 
 
 class AdminConsole:
-    def __init__(self, session_factory):
+    def __init__(self, session_factory, *, spine=None):
         self.sf = session_factory
+        self.spine = spine
 
     def handle(self, text: str | None) -> str | None:
         """Dispatch a '/command'. Returns reply text, or None if `text` is not a command."""
@@ -440,6 +458,8 @@ class AdminConsole:
             return report_topics(self.sf, limit=_int(args, 25, lo=1, hi=50))
         if cmd == "demand":
             return report_demand(self.sf)
+        if cmd == "spine":
+            return report_spine(self.sf, self.spine)
         if cmd == "sources":
             return report_sources(self.sf)
         if cmd == "subs":

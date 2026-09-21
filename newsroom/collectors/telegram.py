@@ -258,6 +258,11 @@ class TelegramCollector:
         self._sleeper = floodwait_sleeper
         self._client = None  # telethon.TelegramClient, created in start()
         self._client_ready = asyncio.Event()  # set once the client is connected
+        # live username->source_id map (realtime handlers filter against this, so newly
+        # added subscriptions are picked up without re-registering handlers) + the set of
+        # sources already backfilled this run (so re-sync only backfills genuinely new ones).
+        self._by_username: dict[str, int] = {}
+        self._backfilled: set[int] = set()
 
     async def wait_client(self):  # pragma: no cover - shared with the metrics loop
         """Block until start() has connected, then hand back the live client so a
@@ -363,8 +368,44 @@ class TelegramCollector:
             ).all()
         return [(sid, handle) for sid, handle in rows]
 
+    def _refresh_by_username(self) -> list[tuple[int, str]]:  # pragma: no cover - DB read
+        """Reload the active telegram sources and rebuild the live username->source_id map
+        the realtime handlers filter against. Returns the (source_id, handle) rows."""
+        sources = self._telegram_sources()
+        self._by_username = {handle.lstrip("@").lower(): sid for sid, handle in sources}
+        return sources
+
+    async def sync_and_backfill_new(self, client, *, first_seed_limit: int | None = None,
+                                    max_backfill: int | None = None) -> int:  # pragma: no cover - network
+        """Refresh the live source map from the DB and backfill any tracked channel not yet
+        backfilled this run. Because the realtime handlers listen to ALL chats and filter by
+        the live map, a newly-subscribed channel starts streaming as soon as its row exists —
+        this just seeds its recent history, WITHOUT a restart. A channel that cannot be
+        resolved yet is left un-backfilled so a later sync retries it. Returns how many were
+        newly backfilled."""
+        seed = first_seed_limit if first_seed_limit is not None else int(os.getenv("TELEGRAM_SEED_LIMIT", "30"))
+        maxbf = max_backfill if max_backfill is not None else int(os.getenv("TELEGRAM_MAX_BACKFILL", "500"))
+        sources = self._refresh_by_username()
+        backfilled = 0
+        for sid, handle in sources:
+            if sid in self._backfilled:
+                continue
+            try:
+                entity = await client.get_entity(handle)
+                await self.backfill_source(client, sid, peer=entity,
+                                           channel_username=handle.lstrip("@"),
+                                           first_seed_limit=seed, max_backfill=maxbf)
+                self._backfilled.add(sid)          # only mark done on success -> failures retry
+                backfilled += 1
+            except Exception as exc:  # noqa: BLE001 — one unresolvable channel must not block the rest
+                log.warning("telegram backfill skipped", extra={"handle": handle, "error": str(exc)})
+        return backfilled
+
     async def start(self, *, album_tick_seconds: float = 2.0) -> None:  # pragma: no cover
-        """Connect, backfill each channel, then stream realtime until disconnected."""
+        """Connect, register realtime handlers, backfill each channel, then stream until
+        disconnected. Handlers listen to ALL chats and filter by the live source map, so
+        channels added later (subscription auto-sync) stream without a restart once
+        sync_and_backfill_new() refreshes the map and seeds their history."""
         from telethon import events
 
         if not telegram_enabled():
@@ -375,43 +416,36 @@ class TelegramCollector:
         self._client = client
         self._client_ready.set()   # unblock the metrics loop (shared session)
 
-        sources = self._telegram_sources()
-        by_username = {handle.lstrip("@").lower(): sid for sid, handle in sources}
+        self._refresh_by_username()   # seed the live map before handlers can fire
 
         async def _sid_for(chat) -> int | None:
             uname = (getattr(chat, "username", None) or "").lower()
-            return by_username.get(uname)
+            return self._by_username.get(uname)   # LIVE map — new channels appear here on sync
 
-        @client.on(events.NewMessage(chats=[h for _, h in sources]))
+        # No chats= filter: bind once to every incoming event and filter by the live map,
+        # so a newly-added source needs no new handler (the fixed-list binding was the reason
+        # new channels were invisible until a restart).
+        @client.on(events.NewMessage())
         async def _new(event):
-            sid = await _sid_for(await event.get_chat())
+            chat = await event.get_chat()
+            sid = await _sid_for(chat)
             if sid is not None:
-                self.on_new_message(sid, event.message, channel_username=getattr(await event.get_chat(), "username", None))
+                self.on_new_message(sid, event.message, channel_username=getattr(chat, "username", None))
 
-        @client.on(events.MessageEdited(chats=[h for _, h in sources]))
+        @client.on(events.MessageEdited())
         async def _edited(event):
             sid = await _sid_for(await event.get_chat())
             if sid is not None:
                 self.on_edit(sid, event.message)
 
-        @client.on(events.MessageDeleted(chats=[h for _, h in sources]))
+        @client.on(events.MessageDeleted())
         async def _deleted(event):
-            sid = await _sid_for(await event.get_chat())
+            chat = getattr(event, "chat", None) or (await event.get_chat() if event.chat_id else None)
+            sid = await _sid_for(chat) if chat is not None else None
             if sid is not None:
                 self.on_delete(sid, list(event.deleted_ids))
 
-        seed = int(os.getenv("TELEGRAM_SEED_LIMIT", "30"))
-        max_backfill = int(os.getenv("TELEGRAM_MAX_BACKFILL", "500"))
-        for sid, handle in sources:
-            # One channel the account cannot resolve (not subscribed, private, wrong
-            # handle) must not abort backfill for the rest.
-            try:
-                entity = await client.get_entity(handle)
-                await self.backfill_source(client, sid, peer=entity,
-                                           channel_username=handle.lstrip("@"),
-                                           first_seed_limit=seed, max_backfill=max_backfill)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("telegram backfill skipped", extra={"handle": handle, "error": str(exc)})
+        await self.sync_and_backfill_new(client)   # backfill the initial set
 
         async def _album_ticker():
             while True:
@@ -419,5 +453,5 @@ class TelegramCollector:
                 self.flush_albums()
 
         asyncio.ensure_future(_album_ticker())
-        log.info("telegram collector started", extra={"channels": len(sources)})
+        log.info("telegram collector started", extra={"channels": len(self._by_username)})
         await client.run_until_disconnected()

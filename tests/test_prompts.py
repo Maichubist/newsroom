@@ -17,6 +17,13 @@ def test_fill_prompt_leaves_json_braces_alone():
     assert '{"claims": ["..."]}' in out and "ТЕКСТ" in out and "{news_text}" not in out
 
 
+def test_fill_prompt_coerces_non_str_values():
+    # a numeric placeholder (e.g. a candidate event id) must not raise
+    # "replace() argument 2 must be str, not int" — it broke the whole publish-time dedup.
+    out = fill_prompt("подія id={candidate_id}, впевненість {conf}", candidate_id=3078, conf=0.9)
+    assert "id=3078" in out and "0.9" in out
+
+
 def test_str_format_would_break_json_prompts():
     # documents WHY we use fill_prompt: str.format raises on the JSON braces
     with pytest.raises(KeyError):

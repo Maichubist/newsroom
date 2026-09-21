@@ -77,11 +77,17 @@ class Verifier:
         threshold: float = DEFAULT_THRESHOLD,
         window_hours: int = DEFAULT_WINDOW_HOURS,
         charter_version: str = "0.3",
+        spine=None,
     ):
         self.sf = session_factory
         self.classifier = classifier
         self.embedder = embedder
         self.risk_matrix = risk_matrix
+        # taxonomy spine (charter v0.3): the floor source + canonical rubric slug. When
+        # given it replaces risk_matrix, and any rubric the classifier emits (old flat
+        # name, Ukrainian root, or a new slug) is normalized to its spine slug. None =
+        # old behaviour (risk.yaml + raw rubric).
+        self.spine = spine
         self.filters = filters
         self.stoplist_rules = stoplist_rules
         self.clusterer = EventClusterer(session_factory, threshold=threshold, window_hours=window_hours)
@@ -247,7 +253,8 @@ class Verifier:
             has_official = any(src.is_official or src.tier == "official" for _, src in rows)
             high_rep = any(src.tier in ("official", "media") for _, src in rows)
 
-            level = self.risk_matrix.level_for(cls.rubrics)
+            level = (self.spine.floor_for_any(cls.rubrics) if self.spine is not None
+                     else self.risk_matrix.level_for(cls.rubrics))
             gate = decide(
                 level,
                 independent_sources=indep,
@@ -258,7 +265,10 @@ class Verifier:
             )
 
             event = s.get(Event, event_id)
-            event.rubric = cls.rubrics[0] if cls.rubrics else None
+            primary = cls.rubrics[0] if cls.rubrics else None
+            # store the canonical spine slug so every downstream reader (floor, oversight,
+            # digest, register, hashtag, demand) keys off one stable vocabulary.
+            event.rubric = (self.spine.resolve(primary) or primary) if self.spine is not None else primary
             event.risk_level = level
             event.status = gate.status
             event.independent_source_count = indep

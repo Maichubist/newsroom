@@ -16,6 +16,17 @@ def test_notice_plain_when_not_risky():
     assert "публікація" in txt and "ризикова" not in txt
 
 
+def test_notice_marks_overseen_high_rubric():
+    # a high-risk-but-supervised rubric (e.g. corruption): labelled "наглядова", not "ризикова"
+    txt = format_publish_notice(headline="Корупційна схема", risk_level="high", is_rumor=False, oversight=True)
+    assert "наглядова" in txt and "ризикова" not in txt
+
+
+def test_critical_label_wins_over_oversight():
+    txt = format_publish_notice(headline="h", risk_level="critical", is_rumor=False, oversight=True)
+    assert "ризикова" in txt and "наглядова" not in txt
+
+
 # --- Supervisor (offline, injected transport) ---------------------------------
 
 class RecordingPoster:
@@ -54,3 +65,20 @@ def test_notify_published_only_for_risky_or_rumor():
     assert len(poster.calls) == 2
     # notices go to the admin chat, not the channel
     assert all(payload["chat_id"] == 999 for _, payload in poster.calls)
+
+
+def test_notify_published_fires_on_oversight_even_when_not_critical():
+    # the confirmed change: a supervised high-risk rubric (corruption/politics/mobilization…)
+    # notifies even though its risk_level is 'high', not 'critical'.
+    sup, poster = _sup()
+    assert sup.notify_published(headline="h", risk_level="high", is_rumor=False, oversight=False) is False
+    assert poster.calls == []                                  # high + not overseen: no notice
+    assert sup.notify_published(headline="h", risk_level="high", is_rumor=False, oversight=True) is True
+    assert len(poster.calls) == 1
+
+
+def test_critical_still_notifies_as_safety_backstop():
+    # even if a rubric's oversight flag were off, a critical post must still notify.
+    sup, poster = _sup()
+    assert sup.notify_published(headline="h", risk_level="critical", is_rumor=False, oversight=False) is True
+    assert len(poster.calls) == 1

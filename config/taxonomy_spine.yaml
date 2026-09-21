@@ -1,0 +1,104 @@
+# Хребет таксономії (charter v0.3) — ЄДИНИЙ фіксований контрольований словник рубрик.
+#
+# Замінює дві розсинхронізовані системи (пласку events.rubric + корені вивченої піраміди)
+# одним стабільним хребтом. Під ним піраміда лишається динамічною; хребет — це ПОЛІТИКА
+# (floor ризику, нагляд), а не структура новин, тому змінюється рідко й керується людиною.
+#
+# Кожна рубрика:
+#   slug      — англ. ідентифікатор для коду (стабільний ключ).
+#   display   — укр. назва (регістр генератора, хештег, UI).
+#   floor     — рівень ризику critical|high|low (charter §3.1). Незмінний OPSEC/етичний
+#               фільтр — ОКРЕМО (stoplist.py), floor його не заміняє.
+#   oversight — true = critical-пост цієї рубрики шле сповіщення нагляду людині
+#               (supervision.py). Набір ≠ critical: корупція high, але наглядова —
+#               це заказний/спекулятивний вектор інформатак.
+#   aliases   — старі пласкі рубрики (англ.) І старі корені піраміди (укр.), що
+#               згортаються сюди. Для бекфілу topic_root і мапінгу класифікатора.
+version: "0.1"
+default_floor: high          # невідома/непозначена рубрика — консервативно (не low)
+
+rubrics:
+  - slug: war
+    display: "Війна / фронт"
+    floor: critical
+    oversight: true
+    aliases: [war, strikes, війна, удари, обстріли]
+
+  - slug: defense
+    display: "Оборона та ОПК"
+    floor: critical
+    oversight: true
+    aliases: [defense, оборона]
+
+  - slug: security
+    display: "Безпека / диверсії / тероризм"
+    floor: critical
+    oversight: true
+    aliases: [security, безпека]
+
+  - slug: mobilization
+    display: "Мобілізація"
+    floor: high
+    oversight: true
+    aliases: [mobilization, мобілізація]
+
+  - slug: politics
+    display: "Політика"
+    floor: high
+    oversight: true
+    aliases: [politics, політика, влада, вибори]
+
+  - slug: geopolitics
+    display: "Міжнародна / геополітика"
+    floor: high
+    oversight: true
+    # нова рубрика: у старих даних зливалась із politics; наповнюється класифікатором
+    aliases: [geopolitics, "міжнародні відносини", геополітика]
+
+  - slug: economy
+    display: "Економіка"
+    floor: low
+    oversight: false
+    aliases: [economy, економіка]
+
+  - slug: corruption
+    display: "Корупція"
+    floor: high
+    oversight: true
+    aliases: [corruption, корупція]
+
+  - slug: law_crime
+    display: "Кримінал і право"
+    floor: high
+    oversight: false
+    aliases: [crime, accusations, кримінал, право]
+
+  - slug: society
+    display: "Суспільство"
+    floor: high
+    oversight: false
+    aliases: [society, суспільство, транспорт, інфраструктура, освіта]
+
+  - slug: tech_science
+    display: "Технології й наука"
+    floor: low
+    oversight: false
+    aliases: [technology, science, технології, наука]
+
+  - slug: environment
+    display: "Довкілля / погода"
+    floor: low
+    oversight: false
+    aliases: [ecology, екологія, природа, погода]
+
+  - slug: sport
+    display: "Спорт"
+    floor: low
+    oversight: false
+    aliases: [sport, спорт]
+
+  - slug: culture
+    display: "Культура та стиль життя"
+    floor: low
+    oversight: false
+    aliases: [culture, lifestyle, культура]

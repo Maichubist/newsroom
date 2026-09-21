@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from newsroom.publishers.cascade import MediaItem, MediaLimits, choose_media
+from newsroom.publishers.cascade import MediaItem, MediaLimits, choose_media, choose_media_group
 from newsroom.publishers.telegram import TelegramPublisher
 
 
@@ -43,6 +43,49 @@ def test_respects_size_limits():
 def test_unknown_size_is_allowed():
     c = choose_media([MediaItem("image", "http://x/i", width=800, size_bytes=None)])
     assert c is not None
+
+
+# --- choose_media_group (albums, offline) -------------------------------------
+
+def test_group_collects_multiple_images_in_order():
+    items = [MediaItem("image", "http://x/1", width=800), MediaItem("image", "http://x/2", width=800),
+             MediaItem("image", "http://x/3", width=800)]
+    g = choose_media_group(items)
+    assert [c.url for c in g] == ["http://x/1", "http://x/2", "http://x/3"]
+    assert all(c.param == "photo" for c in g)
+
+
+def test_group_mixes_image_and_video():
+    items = [MediaItem("image", "http://x/i", width=800), MediaItem("video", "http://x/v")]
+    g = choose_media_group(items)
+    assert {c.param for c in g} == {"photo", "video"} and len(g) == 2
+
+
+def test_group_of_one_when_only_one_eligible():
+    # a lone image -> list of 1 (caller sends it as a single, not a group)
+    assert len(choose_media_group([MediaItem("image", "http://x/i", width=800)])) == 1
+    assert choose_media_group([]) == []
+
+
+def test_group_dedups_and_skips_tiny_and_unsendable():
+    items = [
+        MediaItem("image", "http://x/dup", width=800),
+        MediaItem("image", "http://x/dup", width=800),      # duplicate url -> once
+        MediaItem("image", "http://x/logo", width=100),     # too narrow -> skip
+        MediaItem("image", url=None, storage_key=None),     # unsendable -> skip
+        MediaItem("embed", "http://x/e"),                    # embeds never sent
+    ]
+    g = choose_media_group(items)
+    assert [c.url for c in g] == ["http://x/dup"]
+
+
+def test_group_respects_limits_and_cap():
+    limits = MediaLimits(photo_max_bytes=1000, video_max_bytes=1000)
+    items = [MediaItem("image", "http://x/big", width=800, size_bytes=5000),   # too big -> skip
+             MediaItem("image", "http://x/ok", width=800, size_bytes=500)]
+    assert [c.url for c in choose_media_group(items, limits)] == ["http://x/ok"]
+    many = [MediaItem("image", f"http://x/{i}", width=800) for i in range(15)]
+    assert len(choose_media_group(many, max_group=10)) == 10
 
 
 def test_excludes_narrow_image_but_keeps_unknown_width():

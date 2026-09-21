@@ -37,6 +37,14 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+def _fact_count(fact_base) -> int:
+    """Number of non-empty facts in a fact base — the 'richness' measure that decides
+    whether a duplicate is worth upgrading the live post to."""
+    if not isinstance(fact_base, dict):
+        return 0
+    return sum(1 for f in (fact_base.get("facts") or []) if isinstance(f, dict) and f.get("text"))
+
+
 def _render_send_body(pub) -> str:
     """The text actually sent to Telegram: HTML rendered from the stored pieces
     (bold headline, linked sources) when present, else the plain pub.body. Gate
@@ -61,12 +69,18 @@ class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
                  require_vision: bool = True, charter_version: str = "0.3",
-                 predup=None, predup_enforce: bool = False):
+                 predup=None, predup_enforce: bool = False, spine=None,
+                 enrich_on_duplicate: bool = False):
         self.sf = session_factory
         self.telegram = telegram
         self.stoplist_rules = stoplist_rules
         self.limits = limits
         self.supervisor = supervisor
+        # taxonomy spine (rubric -> oversight). None = old behaviour (notice on critical/rumor only).
+        self.spine = spine
+        # when a richer duplicate arrives, upgrade the already-published post in place
+        # (editMessageText) instead of just dropping it. Only acts in predup ENFORCE.
+        self.enrich_on_duplicate = bool(enrich_on_duplicate)
         # publish-time twin check (Phase A dedup). None = off (default, existing behaviour).
         # In observe mode (predup_enforce=False) the verdict is only LOGGED, never acted on,
         # so the channel is untouched while thresholds are calibrated.
@@ -138,7 +152,7 @@ class Publisher:
             event = s.get(Event, pub.event_id) if pub.event_id else None
             inputs = self._gather_inputs(s, pub, event)
             body = _render_send_body(pub)
-            media_choice = self._media_choice(s, pub.event_id)
+            media_items = self._eligible_media_items(s, pub.event_id)
             reply_to_pub_id, reply_to_message_id = self._story_reply_target(s, event)
 
         decision = evaluate_gate(inputs, self.limits)
@@ -171,21 +185,8 @@ class Publisher:
         if not self._claim_for_send(publication_id):
             return PublishOutcome(publication_id, skipped=True)
 
-        # Prefer uploading the locally stored bytes over sending a URL: Telegram often
-        # cannot fetch a source URL (telesco.pe / hotlink-protected images 400 with
-        # "failed to get HTTP URL content"). If there is no file and no fetchable URL,
-        # drop the media.
-        media_file = self._media_file(media_choice) if media_choice is not None else None
-        if media_choice is not None and media_file is None and not media_choice.url:
-            media_choice = None
-
-        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id,
-                                         file=media_file)
-        if not result.ok and media_choice is not None:
-            # a post must never be lost to a bad image — retry once as text only
-            log.warning("media send failed; retrying as text",
-                        extra={"publication_id_": publication_id, "error": result.error})
-            result = self.telegram.send_post(body, None, reply_to_message_id=reply_to_message_id)
+        result = self._send_with_media(body, media_items, reply_to_message_id=reply_to_message_id,
+                                       publication_id=publication_id)
         with self.sf() as s:
             pub = s.get(Publication, publication_id)
             if result.ok:
@@ -210,6 +211,7 @@ class Publisher:
                 ev = s.get(_Ev, pub.event_id) if pub.event_id else None
                 self._notify_supervisor(publication_id, headline,
                                         risk_level=(ev.risk_level if ev else None),
+                                        rubric=(ev.rubric if ev else None),
                                         is_rumor=pub_is_rumor, message_id=result.message_id)
                 self._purge_media(pub.event_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
@@ -280,21 +282,22 @@ class Publisher:
             log.warning("reconciled stuck publishing rows", extra={"count": len(stuck)})
         return len(stuck)
 
-    def _media_choice(self, s, event_id):
-        """Pick media to attach — only for an event whose media passed the §9.4 reuse
+    def _eligible_media_items(self, s, event_id) -> list:
+        """The event's media eligible to attach — only when its media passed the §9.4 reuse
         check (media_clean, no media_reuse) and the image stop-list / vision check
-        (media_vision_ok, no media_vision_block). In doubt, no media (§3.5).
+        (media_vision_ok, no media_vision_block). In doubt, no media (§3.5). Returns a list of
+        MediaItem (empty when gated out). Feeds both the single cascade and the album.
 
-        When vision moderation is disabled (require_vision=False), the vision-ok
-        requirement is dropped — media attaches on the reuse check alone — but an
-        explicit media_vision_block already on record is still honoured. NOTE: this
-        relaxes the charter media stop-list; intended only for the closed test channel."""
-        from sqlalchemy import select
+        When vision moderation is disabled (require_vision=False), the vision-ok requirement is
+        dropped — media attaches on the reuse check alone — but an explicit media_vision_block
+        already on record is still honoured. NOTE: this relaxes the charter media stop-list;
+        intended only for the closed test channel."""
+        from sqlalchemy import and_, or_, select
 
-        from newsroom.publishers.cascade import MediaItem, choose_media
+        from newsroom.publishers.cascade import MediaItem
 
         if event_id is None:
-            return None
+            return []
         from newsroom.models import Decision, EventItem, Item, MediaAsset
 
         decisions = set(s.execute(
@@ -312,9 +315,7 @@ class Publisher:
         else:
             vision_ok = not vision_blocked          # attach without a vision verdict
         if not (reuse_ok and vision_ok):
-            return None
-
-        from sqlalchemy import and_, or_
+            return []
 
         rows = s.execute(
             select(MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes,
@@ -324,10 +325,57 @@ class Publisher:
             .where(EventItem.event_id == event_id,
                    or_(MediaAsset.url.is_not(None),
                        and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))))
+            .order_by(MediaAsset.id)
         ).all()
-        items = [MediaItem(kind=k, url=u, width=w, size_bytes=sb, storage_key=sk)
-                 for k, u, w, sb, sk in rows]
-        return choose_media(items)
+        return [MediaItem(kind=k, url=u, width=w, size_bytes=sb, storage_key=sk)
+                for k, u, w, sb, sk in rows]
+
+    def _media_choice(self, s, event_id):
+        """The single best media to attach (video → widest image → none)."""
+        from newsroom.publishers.cascade import choose_media
+
+        return choose_media(self._eligible_media_items(s, event_id))
+
+    def _group_attachments(self, choices) -> dict:
+        """{index: (filename, bytes)} for group items whose local bytes we can upload (preferred
+        over a URL Telegram may not fetch). A url-only item is left for URL-send."""
+        out: dict[int, tuple[str, bytes]] = {}
+        for idx, ch in enumerate(choices):
+            f = self._media_file(ch)
+            if f is not None:
+                out[idx] = f
+        return out
+
+    def _send_with_media(self, body, media_items, *, reply_to_message_id, publication_id):
+        """Send the post with its media. An ALBUM (sendMediaGroup) when 2+ eligible media and
+        the body fits a caption; else the single-media cascade (video → widest image → text).
+        Every path falls back so a bad image/album never loses the post. Prefers uploading local
+        bytes over a URL (Telegram often can't fetch a source URL). Returns a PublishResult."""
+        from newsroom.publishers.cascade import choose_media, choose_media_group
+        from newsroom.publishers.telegram import TELEGRAM_CAPTION_LEN
+
+        group = choose_media_group(media_items)
+        if len(group) >= 2 and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
+            attachments = self._group_attachments(group)
+            result = self.telegram.send_media_group(
+                group, body, reply_to_message_id=reply_to_message_id, attachments=attachments)
+            if result.ok:
+                return result
+            log.warning("album send failed; falling back to single media",
+                        extra={"publication_id_": publication_id, "error": result.error})
+
+        media_choice = choose_media(media_items)
+        media_file = self._media_file(media_choice) if media_choice is not None else None
+        if media_choice is not None and media_file is None and not media_choice.url:
+            media_choice = None                     # no fetchable URL and no local file -> drop it
+        result = self.telegram.send_post(body, media_choice, reply_to_message_id=reply_to_message_id,
+                                         file=media_file)
+        if not result.ok and media_choice is not None:
+            # a post must never be lost to a bad image — retry once as text only
+            log.warning("media send failed; retrying as text",
+                        extra={"publication_id_": publication_id, "error": result.error})
+            result = self.telegram.send_post(body, None, reply_to_message_id=reply_to_message_id)
+        return result
 
     def _media_file(self, choice):
         """Read the choice's locally stored bytes for upload (filename, bytes), or None
@@ -384,12 +432,13 @@ class Publisher:
         except Exception:  # noqa: BLE001 - cleanup is best-effort
             log.exception("post-publish media purge failed")
 
-    def _notify_supervisor(self, publication_id, headline, *, risk_level, is_rumor, message_id) -> None:
+    def _notify_supervisor(self, publication_id, headline, *, risk_level, rubric, is_rumor, message_id) -> None:
         if self.supervisor is None:
             return
+        oversight = bool(self.spine.needs_oversight(rubric)) if self.spine is not None else False
         try:
             self.supervisor.notify_published(
-                headline=headline, risk_level=risk_level, is_rumor=is_rumor,
+                headline=headline, risk_level=risk_level, is_rumor=is_rumor, oversight=oversight,
                 channel_ref=str(message_id) if message_id is not None else None,
                 publication_id=publication_id,
             )
@@ -422,6 +471,14 @@ class Publisher:
                 if action == ACTION_DUPLICATE:
                     if event is not None and verdict.canonical_event_id is not None:
                         event.duplicate_of = verdict.canonical_event_id
+                    # if this duplicate is RICHER than the already-published canonical, upgrade
+                    # the live post in place instead of silently dropping the better version.
+                    if (self.enrich_on_duplicate and pub is not None and pub.event_id is not None
+                            and verdict.canonical_event_id is not None):
+                        enriched = self._enrich_canonical(s, dup_pub=pub,
+                                                          canonical_event_id=verdict.canonical_event_id)
+                        if enriched is not None:
+                            details["enriched_publication_id"] = enriched
                     if pub is not None:
                         pub.status = "superseded"
                 elif action == ACTION_UPDATE:
@@ -458,6 +515,61 @@ class Publisher:
         if effective == ACTION_HOLD_REVIEW:
             self._notify_review(publication_id, verdict)
         return PublishOutcome(publication_id, published=False, reasons=[f"predup_{effective}"])
+
+    def _enrich_canonical(self, s, *, dup_pub, canonical_event_id: int) -> int | None:
+        """Upgrade the canonical event's live post to this richer duplicate's body via
+        editMessageText. Returns the enriched publication id, or None when nothing was done
+        (no live post / not actually richer / edit refused). Never raises — enrichment is
+        best-effort and runs inside the supersede path, so a failure must not break publish."""
+        from sqlalchemy import select
+
+        from newsroom.models import Decision, Event, Publication
+
+        try:
+            canon_pub = s.execute(
+                select(Publication).where(
+                    Publication.event_id == canonical_event_id,
+                    Publication.channel == "telegram",
+                    Publication.status == "published",
+                    Publication.channel_ref.is_not(None))
+                .order_by(Publication.published_at.desc())
+            ).scalars().first()
+            if canon_pub is None:
+                return None                       # nothing published to upgrade
+            dup_event = s.get(Event, dup_pub.event_id)
+            canon_event = s.get(Event, canonical_event_id)
+            dup_facts = _fact_count(dup_event.fact_base if dup_event else None)
+            canon_facts = _fact_count(canon_event.fact_base if canon_event else None)
+            if dup_facts <= canon_facts:
+                return None                       # not richer -> keep the existing post as is
+            try:
+                message_id = int(canon_pub.channel_ref)
+            except (TypeError, ValueError):
+                return None
+            body = _render_send_body(dup_pub)
+            result = self.telegram.edit_text(body, chat_id=None, message_id=message_id)
+            if not result.ok:
+                # a media post can't be edited as text, or the body is too long -> keep original
+                log.info("enrich edit skipped", extra={"reason": result.error, "publication_id": canon_pub.id})
+                return None
+            # reflect the upgraded content in the DB and journal it
+            canon_pub.headline = dup_pub.headline or canon_pub.headline
+            canon_pub.body = dup_pub.body or canon_pub.body
+            feats = dict(canon_pub.features or {})
+            dup_render = (dup_pub.features or {}).get("render")
+            if isinstance(dup_render, dict):
+                feats["render"] = dup_render
+            feats["enriched_from_event"] = dup_pub.event_id
+            canon_pub.features = feats
+            canon_pub.status = "edited"
+            s.add(Decision(entity_type="publication", entity_id=str(canon_pub.id), stage="publish",
+                           decision="enriched", reason="richer duplicate",
+                           details={"from_event": dup_pub.event_id, "facts": [canon_facts, dup_facts]},
+                           charter_version=self.charter_version))
+            return canon_pub.id
+        except Exception:  # noqa: BLE001 - enrichment must never break the publish path
+            log.exception("enrich canonical failed")
+            return None
 
     def _record_predup_error(self, publication_id: int, exc: Exception) -> None:
         """Journal a predup failure and alert the supervisor. The post is still sent (the

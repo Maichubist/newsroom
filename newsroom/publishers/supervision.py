@@ -18,10 +18,15 @@ log = logging.getLogger("newsroom.publishers.supervision")
 
 
 def format_publish_notice(*, headline: str | None, risk_level: str | None,
-                          is_rumor: bool, channel_ref: str | None = None) -> str:
+                          is_rumor: bool, oversight: bool = False,
+                          channel_ref: str | None = None) -> str:
     labels: list[str] = []
     if risk_level == "critical":
         labels.append("⚠️ ризикова")
+    elif oversight:
+        # a high-risk-but-supervised rubric (corruption, politics, mobilization…):
+        # not "critical", but flagged for human eyes (info-attack / speculative vector).
+        labels.append("наглядова")
     if is_rumor:
         labels.append("чутка")
     label = ", ".join(labels) or "публікація"
@@ -58,14 +63,19 @@ class Supervisor:
         return result.ok
 
     def notify_published(self, *, headline: str | None, risk_level: str | None,
-                         is_rumor: bool, channel_ref: str | None = None,
+                         is_rumor: bool, oversight: bool = False,
+                         channel_ref: str | None = None,
                          publication_id: int | None = None) -> bool:
-        """Notify only for the posts that matter: critical-topic or rumor. The
-        notice carries Recall/Stop buttons the supervision bot acts on (§10)."""
-        if not (risk_level == "critical" or is_rumor):
+        """Notify for the posts that need human eyes: a rubric flagged for oversight
+        (the confirmed set — war/defense/security/mobilization/politics/geopolitics/
+        corruption; corruption is a speculative info-attack vector), a critical-topic
+        post (kept as a safety backstop even if a rubric's oversight flag is off), or a
+        rumor. The notice carries Recall/Stop buttons the supervision bot acts on (§10)."""
+        if not (oversight or risk_level == "critical" or is_rumor):
             return False
         text = format_publish_notice(headline=headline, risk_level=risk_level,
-                                     is_rumor=is_rumor, channel_ref=channel_ref)
+                                     is_rumor=is_rumor, oversight=oversight,
+                                     channel_ref=channel_ref)
         return self.notify(text, reply_markup=supervision_keyboard(publication_id))
 
     def notify_review(self, *, headline: str | None, publication_id: int | None,

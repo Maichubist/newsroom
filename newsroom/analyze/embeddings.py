@@ -7,6 +7,7 @@ matches db.base.EMBEDDING_DIM.
 """
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 import numpy as np
@@ -21,11 +22,52 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"  # 1536 dims == EMBEDDING_DIM
 # signal for clustering, and it means a long full-text article never 400s.
 MAX_EMBED_CHARS = 8000
 
+# Boilerplate that pulls a cross-source twin's vector toward the CHANNEL's template
+# instead of the story (measured: it drags real twins' cosine below the story-link bar).
+# We strip footers/emoji/URLs before embedding — NOT linguistic reduction (lemmatizing or
+# keeping only nouns HURTS a transformer embedding and destroys negation/modality), and NO
+# lede truncation (double-edged: it cut shared facts). Raw text is untouched; this only
+# feeds the embedder. The biggest win is the Telegram side (RSS is already trafilatura-clean).
+_URL_RE = re.compile(r"https?://\S+")
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF\U0000FE00-\U0000FE0F\U00002190-\U000021FF]+",
+    flags=re.UNICODE,
+)
+# subscribe/donate/social footer phrases — matched only on SHORT lines or pipe/🛑 menus,
+# so content words (програми ПІДТРИМКИ, Зеленський ПІДПИСАВ) are never dropped.
+_FOOTER_RE = re.compile(
+    r"(підписат|підписуй|підтримати нас|підтримати$|наш канал|читайте також|instagram|"
+    r"facebook|youtube|threads|tiktok|тikтok|t\.me/|написати нам|зсу\s*help)",
+    re.IGNORECASE,
+)
+
+
+def clean_for_embedding(text: str | None) -> str:
+    """Strip channel boilerplate (subscribe/social footers, emoji, URLs, pipe/🛑 menus)
+    from text before embedding. Never linguistic reduction, never lede truncation. Falls
+    back to the raw stripped text if cleaning would empty it (an all-footer post)."""
+    raw = (text or "").replace("\xa0", " ")
+    stripped_url = _URL_RE.sub(" ", raw)
+    out: list[str] = []
+    for line in stripped_url.split("\n"):
+        no_emoji = _EMOJI_RE.sub("", line)
+        stripped = no_emoji.strip(" |—-•·🛑").strip()
+        if not stripped:
+            continue
+        is_menu = line.count("|") >= 2 or line.count("🛑") >= 2
+        is_footer = _FOOTER_RE.search(no_emoji) and len(stripped) < 70
+        if is_menu or is_footer:
+            continue
+        out.append(stripped)
+    cleaned = re.sub(r"\n{2,}", "\n", re.sub(r"[ \t]+", " ", "\n".join(out))).strip()
+    return cleaned or raw.strip()
+
 
 def clip_for_embedding(text: str | None, *, max_chars: int = MAX_EMBED_CHARS) -> str:
-    """Trim embedding input to a safe length (never empty)."""
-    trimmed = (text or "").strip()
-    return trimmed[:max_chars] or " "
+    """Clean channel boilerplate, then trim to a safe length (never empty)."""
+    trimmed = clean_for_embedding(text)[:max_chars]
+    return trimmed or " "
 
 
 class Embedder(Protocol):

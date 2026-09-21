@@ -35,6 +35,7 @@ class EditorialPipeline:
         ai_accent_patterns,
         charter_version: str = "0.2",
         prompt_version: str = "0.2",
+        spine=None,
     ):
         self.sf = session_factory
         self.generator = generator
@@ -42,6 +43,9 @@ class EditorialPipeline:
         self.ai_accent_patterns = ai_accent_patterns
         self.charter_version = charter_version
         self.prompt_version = prompt_version
+        # taxonomy spine: gives the generator the Ukrainian rubric name for its register
+        # (tone) hint instead of the raw English slug (law_crime -> "Кримінал і право").
+        self.spine = spine
 
     def produce(self, event_id: int) -> ProduceResult:
         from sqlalchemy import select
@@ -68,8 +72,13 @@ class EditorialPipeline:
         # show "Повідомляють:" only where the confidence level matters — a
         # single-source high/critical item — not on routine reported news.
         reported = status == "reported" and risk_level in ("high", "critical")
+        register = ""
+        if self.spine is not None and rubrics:
+            slug = self.spine.resolve(rubrics[0])
+            if slug:
+                register = self.spine.rubrics[slug].display
         ctx = GenerationContext(title=title, summary=summary, rubrics=rubrics, status=status,
-                                facts=facts, source_excerpt=source_excerpt)
+                                facts=facts, source_excerpt=source_excerpt, register=register)
 
         # A generation that failed (fallback) or produced no real content must not
         # become a post: leave the event undrafted so the next tick retries it once
@@ -173,7 +182,6 @@ class EditorialPipeline:
 
 def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25,
                    classify_grace_seconds: float = 180.0,
-                   significance_threshold: float | None = None,
                    require_curation: bool = False) -> dict[str, int]:
     """One editorial tick: draft posts for publishable events that don't have a
     publication yet. Events the story-update step classified as summary-only
@@ -211,13 +219,6 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
             ),
         ),
     ]
-    if significance_threshold is not None:
-        # skip events scored below the bar; an unscored event waits the grace for
-        # the scorer, then drafts anyway so nothing stalls if scoring is off (T1 gate)
-        conditions.append(or_(
-            Event.significance >= significance_threshold,
-            and_(Event.significance.is_(None), or_(Event.story_id.is_(None), Event.updated_at < cutoff)),
-        ))
     if require_curation:
         # only draft events the editorial curation marked publish — count follows the
         # news, not a rate (must-publish events are marked publish deterministically)
@@ -253,9 +254,21 @@ def _facts_from_base(fact_base, *, limit: int = 12) -> list[str]:
     out: list[str] = []
     for f in rows[:limit]:
         text = str(f["text"]).strip()
+        # carry modality/attribution/time-frame to the generator so it preserves them:
+        # a statement stays attributed ("за даними X"), a forecast keeps "може/планує",
+        # and the time frame is never dropped (charter: don't overstate / don't distort).
+        modality = str(f.get("modality") or "fact").strip().lower()
+        attribution = str(f.get("attribution")).strip() if f.get("attribution") else ""
+        time_frame = str(f.get("time_frame")).strip() if f.get("time_frame") else ""
+        prefix = ""
+        if modality == "statement":
+            prefix = f"[заява{': ' + attribution if attribution else ''}] "
+        elif modality == "forecast":
+            prefix = f"[прогноз{': ' + attribution if attribution else ''}] "
+        suffix = f" [рамка: {time_frame}]" if time_frame else ""
         if f.get("divergent"):
-            text += " (джерела розходяться в цифрах)"
-        out.append(text)
+            suffix += " (джерела розходяться в цифрах)"
+        out.append(prefix + text + suffix)
     return out
 
 

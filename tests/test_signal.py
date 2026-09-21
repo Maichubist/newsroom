@@ -28,6 +28,27 @@ def test_subscribe_to_win_is_noise():
     assert v.is_noise and "subscribe_to_win" in v.reasons
 
 
+@pytest.mark.parametrize("title", [
+    "Перший саміт Карпатської вісімки, Україна отримала 3,3 млрд євро від ЄС, нові правила залізниці. 1668 день війни",
+    "1665-й день війни: головні події війни проти України",
+    "Атака на Київ, переговори у Стамбулі. 1670-й день війни",
+])
+def test_war_day_digest_is_noise(title):
+    # Суспільне's daily multi-topic running digest -> drop (would make a Frankenstein post)
+    v = classify_noise(title, "Суспільне веде текстовий онлайн.", FILTERS)
+    assert v.is_noise and "war_day_digest" in v.reasons
+
+
+@pytest.mark.parametrize("title,text", [
+    ("ЄС виділив 3,3 млрд євро на оборонні потреби", "У Євросоюзі оголосили про виділення коштів."),
+    ("Війна триває вже 1668 днів", "ЗСУ утримують позиції на сході."),   # "днів", not "день війни"
+    ("ЗСУ звільнили село на Донеччині", "Сили оборони просунулися на кілька кілометрів."),
+])
+def test_single_event_war_news_is_not_digest_noise(title, text):
+    v = classify_noise(title, text, FILTERS)
+    assert v.is_noise is False and v.reasons == []
+
+
 # --- noise: false positives (must NOT be dropped) ------------------------------
 
 def test_normal_news_with_subscribe_footer_is_not_noise():

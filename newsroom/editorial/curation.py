@@ -12,8 +12,7 @@ big-news window yields more. Two paths:
     Comparative-in-a-batch, not an absolute score (CLAUDE.md).
 
 Curation gates *drafting*: only publish-marked events are drafted, so we don't spend
-generation tokens on posts we would not publish. The significance gate still runs
-first as a cheap pre-filter, so the ranker never sees obvious niche.
+generation tokens on posts we would not publish.
 
 The vocabulary, must_publish and parsing are pure and offline-tested; the ranker is
 pluggable (LLM in prod, fake in tests).
@@ -50,10 +49,10 @@ class Candidate:
     title: str
     rubric: str | None = None
     risk_level: str | None = None
-    significance: float | None = None
     facts: list[str] = field(default_factory=list)
-    demand: float | None = None        # learned audience demand for the rubric (0..1), or None
+    demand: float | None = None        # learned audience demand (0..1), or None
     heat: float | None = None          # data-driven hot-topic heat for this event (0..1), or None
+    age_hours: float | None = None     # hours since the latest SOURCE publish date (freshness), or None
 
 
 def _demand_label(demand: float | None) -> str:
@@ -64,6 +63,20 @@ def _demand_label(demand: float | None) -> str:
     if demand >= 0.33:
         return "середній"
     return "низький"
+
+
+def _freshness_label(age_hours: float | None) -> str:
+    """Freshness from the source publish date (not our fetch time), so the ranker can
+    spot OLD news served as new (date of the event ≠ date of the repost)."""
+    if age_hours is None:
+        return "невідомо"
+    if age_hours < 6:
+        return "свіже"
+    if age_hours < 24:
+        return "сьогодні"
+    if age_hours < 72:
+        return "кілька днів"
+    return "застаріле"
 
 
 def _heat_label(heat: float | None) -> str:
@@ -123,6 +136,9 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 - ГАРЯЧІСТЬ ТЕМИ: «тема» біля кандидата — наскільки саме цей сюжет зараз активно
   обговорюють у стрічці конкурентів (гаряча = багато постів + залученість зараз).
   Гаряча тема — сильний сигнал на користь публікації, поки вона в тренді.
+- СВІЖІСТЬ: «свіжість» біля кандидата — за датою публікації В ДЖЕРЕЛІ, а не коли ми це
+  побачили. «застаріле» = стара новина, яку джерело подало як нову: майже завжди hold,
+  хіба що є справді новий поворот. «свіже/сьогодні» — плюс.
 
 ПУБЛІКУВАТИ обов'язково — справді значущі безпекові/фронтові події: великі удари з
 наслідками (жертви, руйнування, влучання по інфраструктурі), помітна ескалація,
@@ -142,7 +158,9 @@ DEFAULT_RANK_PROMPT = """Ти — випусковий редактор серй
 - рутинна кримінальна хроніка й суди районного рівня (крім резонансних справ);
 - процедурні/технічні дрібниці, галузеві оголошення без наслідків для широкого читача;
 - місцевий спорт і культура без загальнонаціонального інтересу;
-- одне слабке джерело без розвитку теми.
+- одне слабке джерело без розвитку теми;
+- ПОРОЖНЯ фактична база: якщо під заголовком немає конкретних фактів (цифр, імен,
+  місць, деталей) — завжди hold. Заголовок без суті не публікуємо, хай тема й гаряча.
 Окремо: загибель КОНКРЕТНОЇ людини, невідомої широкому загалу (некролог, прощання з
 бійцем, «загинув військовий N») — hold. Гідно шани, але не масова новина, і канал не має
 ставати стрічкою некрологів. ВИНЯТОК (publish): масові втрати внаслідок удару/події або
@@ -162,7 +180,8 @@ def _render_candidates(candidates: list[Candidate]) -> str:
     lines: list[str] = []
     for c in candidates:
         head = (f"[id={c.event_id}] ({c.rubric or '?'}/{c.risk_level or '?'}, "
-                f"попит: {_demand_label(c.demand)}, тема: {_heat_label(c.heat)}) {c.title.strip()}")
+                f"попит: {_demand_label(c.demand)}, тема: {_heat_label(c.heat)}, "
+                f"свіжість: {_freshness_label(c.age_hours)}) {c.title.strip()}")
         lines.append(head)
         for f in c.facts[:3]:
             if f and f.strip():
@@ -213,13 +232,39 @@ def _facts_brief(fact_base, *, limit: int = 3) -> list[str]:
     return [str(f["text"]).strip() for f in rows[:limit]]
 
 
-def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_threshold: float | None = None,
+def _load_event_freshness(session, event_ids, now) -> dict[int, float]:
+    """Hours since the LATEST source publish date per event — freshness by the article's
+    own date on the site, not our fetch time, so the ranker can spot old news served as
+    new. Items without a published_at are ignored; an event with none is simply absent."""
+    from sqlalchemy import func, select
+
+    from newsroom.models import EventItem, Item
+
+    event_ids = list(event_ids)
+    if not event_ids:
+        return {}
+    rows = session.execute(
+        select(EventItem.event_id, func.max(Item.published_at))
+        .join(Item, Item.id == EventItem.item_id)
+        .where(EventItem.event_id.in_(event_ids), Item.published_at.is_not(None))
+        .group_by(EventItem.event_id)
+    ).all()
+    out: dict[int, float] = {}
+    for eid, latest in rows:
+        if latest is not None:
+            out[eid] = max((now - latest).total_seconds() / 3600.0, 0.0)
+    return out
+
+
+def curate_pending(session_factory, ranker: "EditorialRanker", *,
                    window_hours: int = 6, limit: int = 40, require_dedup_settled: bool = False,
                    dedup_grace_seconds: float = 300.0) -> dict[str, int]:
-    """One curation tick: mark recent significant, not-yet-curated events publish/hold.
-    must-publish events are marked deterministically; the rest are ranked comparatively
-    by the LLM. Only publish-marked events are later drafted. With require_dedup_settled,
-    an event waits for the ingest-dedup verdict first (Phase B savings)."""
+    """One curation tick: mark recent, not-yet-curated events publish/hold. Selection is
+    by popularity (charter v0.3): demand × heat feed the ranker, substance (the facts
+    shown per candidate) keeps content-free events out. must-publish (refutation) events
+    are marked deterministically; the rest are ranked comparatively by the LLM. Only
+    publish-marked events are later drafted. With require_dedup_settled, an event waits
+    for the ingest-dedup verdict first."""
     import datetime as dt
 
     from sqlalchemy import select
@@ -236,45 +281,53 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         Event.duplicate_of.is_(None),        # skip events marked duplicate (LLM batch dedup)
         Event.first_seen_at >= cutoff,
     ]
-    if significance_threshold is not None:
-        conditions.append(Event.significance >= significance_threshold)
+    # selection is by popularity (charter v0.3): the ranker weighs demand × heat and sees
+    # each candidate's facts, so a content-free event is held on the spot and never becomes
+    # a post (content_is_publishable is the downstream backstop).
     dedup_clause = dedup_settled_clause(require_dedup_settled,
                                         now - dt.timedelta(seconds=dedup_grace_seconds))
     if dedup_clause is not None:
         conditions.append(dedup_clause)
 
     from newsroom.analyze.demand import load_demand
-    from newsroom.analyze.taxonomy import load_event_heat
+    from newsroom.analyze.taxonomy import load_event_signals
     from newsroom.models import Publication
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
-                   Event.significance, Event.fact_base, Event.update_type)
+                   Event.fact_base, Event.update_type)
             .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
-            .order_by(Event.significance.desc().nullslast(), Event.id).limit(limit)
+            # newest first: at scale the freshest events reach the ranker before the window's tail.
+            .order_by(Event.first_seen_at.desc(), Event.id).limit(limit)
         ).all()
         if not rows:
             return {"curated": 0, "publish": 0, "hold": 0, "must": 0}
 
-        demand_by_rubric = load_demand(s)                        # learned audience demand per rubric ({} until data)
-        event_heat = load_event_heat(s, [r[0] for r in rows])   # taxonomy-pyramid heat per event (0 until data)
+        demand_by_rubric = load_demand(s)                        # L1 rubric-demand fallback ({} until data)
+        # per-event (heat, demand) from the L2 topic node — the two-top-levels popularity
+        # signal, so a routine sub-topic stays cold under a hot broad rubric.
+        event_signals = load_event_signals(s, [r[0] for r in rows])
+        freshness = _load_event_freshness(s, [r[0] for r in rows], now)   # content age by source publish date
 
     decisions: dict[int, str] = {}
     must_ids: set[int] = set()
     to_rank: list[Candidate] = []
-    for eid, title, rubric, risk, sig, fact_base, update_type in rows:
+    for eid, title, rubric, risk, fact_base, update_type in rows:
         # only a refutation skips the editor (a correction must go out); everything else,
         # breaking critical news included, is judged comparatively by the ranker
         if must_publish(update_type=update_type):
             decisions[eid] = CURATE_PUBLISH
             must_ids.add(eid)
         else:
+            heat, node_demand = event_signals.get(eid, (0.0, 0.0))
+            # L2 node demand is primary; fall back to the L1 rubric-demand index when the
+            # topic has no engagement data yet (or the event is unplaced on the pyramid).
+            demand = node_demand or (demand_by_rubric.get(rubric) if rubric else None)
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
-                                     significance=sig, facts=_facts_brief(fact_base),
-                                     demand=demand_by_rubric.get(rubric) if rubric else None,
-                                     heat=event_heat.get(eid) or None))
+                                     facts=_facts_brief(fact_base),
+                                     demand=demand, heat=heat or None, age_hours=freshness.get(eid)))
     must_count = len(decisions)
 
     if to_rank:

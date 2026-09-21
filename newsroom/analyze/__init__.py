@@ -55,7 +55,7 @@ from newsroom.analyze.ai_accent import (
 # NB: ingest_dedup (Phase B) is intentionally NOT re-exported here — it imports from
 # newsroom.publishers.predup, and pulling the publishers package into every
 # `import newsroom.analyze` would risk an import cycle. Import it by full path
-# (from newsroom.analyze.ingest_dedup import ...), like taxonomy/significance/demand.
+# (from newsroom.analyze.ingest_dedup import ...), like taxonomy/demand.
 
 __all__ = [
     "SourceItem", "group_materials", "independent_source_count",

@@ -5,8 +5,9 @@ config/sources.yaml for each one, this reads the account's channel dialogs and a
 not-yet-tracked public channel as a `telegram` source. Discovered sources persist (the
 YAML sync only upserts YAML entries, it never deactivates others), so once added they stay.
 
-Note: the realtime collector registers its per-channel handlers once at start(), so a
-newly-added channel is only *collected* after the next restart — this just registers it.
+Note: the realtime collector listens to all chats and filters by a live source map, so a
+newly-added channel starts streaming as soon as its row exists; `subscriptions_sync_forever`
+then calls `collector.sync_and_backfill_new` to seed its recent history — no restart needed.
 
 `sync_subscriptions` is pure/DB (a fake channel list in tests); listing the live dialogs is
 a thin Telethon call kept behind `# pragma`.

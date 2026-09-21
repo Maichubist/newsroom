@@ -289,7 +289,6 @@ def test_merge_events_reverifies_canonical(pg_engine):
         k.status = "signal"                 # high + 1 source -> was 'signal' (needs a 2nd)
         k.independent_source_count = 1
         k.fact_base = {"facts": [{"text": "стара база"}]}
-        k.significance = 0.5
         s.commit()
 
     with Session(pg_engine) as s:
@@ -299,7 +298,7 @@ def test_merge_events_reverifies_canonical(pg_engine):
     with Session(pg_engine) as s:
         k = s.get(Event, keep)
         assert k.independent_source_count == 2       # gained the drop's independent source
-        assert k.fact_base is None and k.significance is None   # invalidated for rebuild
+        assert k.fact_base is None                   # invalidated for rebuild
         assert k.status == "reported"                # re-decided: high + 2 independent sources
 
 

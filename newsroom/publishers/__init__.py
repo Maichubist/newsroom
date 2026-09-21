@@ -1,5 +1,11 @@
 from newsroom.publishers.telegram import PublishResult, TelegramPublisher, split_text
-from newsroom.publishers.cascade import MediaChoice, MediaItem, MediaLimits, choose_media
+from newsroom.publishers.cascade import (
+    MediaChoice,
+    MediaItem,
+    MediaLimits,
+    choose_media,
+    choose_media_group,
+)
 from newsroom.publishers.gate import (
     STOP_KEY,
     GateDecision,
@@ -47,7 +53,7 @@ from newsroom.publishers.shadow import (
 __all__ = [
     "TelegramPublisher", "PublishResult", "split_text",
     # media cascade (§13)
-    "MediaItem", "MediaChoice", "MediaLimits", "choose_media",
+    "MediaItem", "MediaChoice", "MediaLimits", "choose_media", "choose_media_group",
     # gate (§10)
     "GateInputs", "GateDecision", "Limits", "evaluate_gate", "load_limits",
     "is_publishing_stopped", "set_publishing_stopped", "STOP_KEY",

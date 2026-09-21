@@ -26,6 +26,15 @@ def test_material_without_facts_falls_back_to_title_and_source():
     assert "Факти" not in material          # no facts section when there are none
 
 
+def test_register_display_overrides_raw_slug_in_material():
+    # the register (spine display) is the tone hint, not the English slug
+    ctx = GenerationContext(title="Подія", rubrics=["law_crime"], register="Кримінал і право")
+    material = build_material(ctx)
+    assert "Рубрика: Кримінал і право" in material and "law_crime" not in material
+    # falls back to the rubric when no register is given
+    assert "Рубрика: economy" in build_material(GenerationContext(title="t", rubrics=["economy"]))
+
+
 def test_material_includes_rubric_for_register():
     ctx = GenerationContext(title="Шахтар зіграв внічию", rubrics=["sport"],
                             source_excerpt="Матч завершився 1:1.")
@@ -56,3 +65,18 @@ def test_facts_sorted_by_confirmation_and_marks_divergence():
 def test_facts_from_missing_base_is_empty():
     assert _facts_from_base(None) == []
     assert _facts_from_base({"facts": []}) == []
+
+
+def test_facts_from_base_carries_modality_markers():
+    # modality/attribution/time-frame reach the generator so it can't distort them
+    fb = {"facts": [
+        {"text": "Україна отримала 3,3 млрд євро", "modality": "fact", "confirmed_by": 2},
+        {"text": "Росія готує мобілізацію 600 тис.", "modality": "statement",
+         "attribution": "українська розвідка", "time_frame": "у 2026-2027", "confirmed_by": 1},
+        {"text": "Естонія може закрити кордон", "modality": "forecast", "confirmed_by": 1},
+    ]}
+    facts = _facts_from_base(fb)
+    joined = "\n".join(facts)
+    assert "[заява: українська розвідка]" in joined and "[рамка: у 2026-2027]" in joined
+    assert "[прогноз]" in joined
+    assert "Україна отримала 3,3 млрд євро" in facts   # a plain fact carries no marker

@@ -4,6 +4,9 @@ Writes the charter §10 structured content from an event's fact base, in the
 charter §6 voice. JSON is retried once and falls back to a minimal factual draft
 (headline+lead from the given context) so a generation glitch never fabricates —
 the critic still gates whatever comes out.
+
+Posts are FACTS ONLY — no analysis / interpretation / "what it means". Editorial
+analysis is a separate rubric (later), so the news feed stays dry and credible.
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ class GenerationContext:
     status: str = "confirmed"
     facts: list[str] = field(default_factory=list)   # from the event's shared fact base (§8)
     source_excerpt: str = ""                          # trimmed source text, for concrete detail
+    register: str = ""                                # human rubric name for the tone hint (spine display); falls back to rubrics[0]
 
 
 class Generator(Protocol):
@@ -42,8 +46,9 @@ def build_material(context: GenerationContext) -> str:
     parts: list[str] = []
     if context.title:
         parts.append(f"Подія: {context.title.strip()}")
-    if context.rubrics:
-        parts.append("Рубрика: " + context.rubrics[0].strip())
+    label = context.register.strip() or (context.rubrics[0].strip() if context.rubrics else "")
+    if label:
+        parts.append("Рубрика: " + label)
     if context.facts:
         bullets = "\n".join(f"- {f.strip()}" for f in context.facts if f and f.strip())
         if bullets:
@@ -66,8 +71,18 @@ DEFAULT_PROMPT = """Ти — редактор українського нови�
 - Почни з найважливішого або найцікавішого в події — знайди суть, а не переказуй заголовок.
 - Переходи між абзацами роби природно. НЕ вживай канцелярських зв'язок: «Таким чином»,
   «Цей крок свідчить», «Цей випадок демонструє», «Це підкреслює», «Варто зазначити».
-- Значення події («що це означає») вплітай у текст ЛИШЕ якщо є конкретний, неочевидний
-  наслідок. Якщо його немає — не додавай нічого.
+- ЖОДНОГО аналізу, інтерпретації, прогнозів чи оцінки значення («що це означає», «це
+  свідчить про…», «це вплине на…», «це важливо, бо…»). Пиши ТІЛЬКИ факти: що сталося,
+  де, коли, хто, скільки, з чиїх слів. Аналітику винесемо в окрему рубрику — тут її не місце.
+- НЕ спотворюй суть факту при переказі: «оголосили / виділили / планують / домовились» ≠
+  «зробили / отримали / збудували». Зберігай КЛЮЧОВІ уточнення — мету, суму, умову, хто саме
+  й з чиїх слів (напр. «3,3 млрд євро НА ОБОРОННІ ПОТРЕБИ», а не просто «3,3 млрд євро»).
+  Без цих уточнень факт змінює зміст. Не змішуй у пості різні події, якщо їх кілька в матеріалі.
+- Маркери у фактах ОБОВ'ЯЗКОВО збережи: [заява: X] — це твердження когось, подай з атрибуцією
+  («за даними X», «X заявив»), НЕ як встановлений факт; [прогноз] — намір/можливість, лиши
+  «планує / може / розглядає», не перетворюй на «зробив / вирішив»; [рамка: …] — збережи цю
+  часову чи умовну рамку (напр. «з грудня 2023»), інакше зміниться зміст. Самі дужкові маркери
+  в текст поста не переписуй — це підказки, а не текст.
 
 ЗАБОРОНЕНО (саме через це попередні пости були мертві):
 - Очевидні або порожні «висновки»: «чоловік тепер служитиме в армії», «це свідчить про

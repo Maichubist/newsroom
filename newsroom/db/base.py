@@ -55,6 +55,8 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat double precision DEFAULT 0.0",
     "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat_events integer DEFAULT 0",
     "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat_at timestamptz",
+    # audience-engagement demand per node (L1+L2 popularity), computed alongside heat
+    "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS demand double precision DEFAULT 0.0",
     # local media file deleted after publication (phash reuse-archive stays in DB)
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS purged_at timestamptz",
     # Telegram message id for re-fetching url-less media via Telethon

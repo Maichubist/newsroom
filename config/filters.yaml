@@ -43,6 +43,14 @@ noise:
     - '(?i)^реклама[:\s]'
   subscribe_to_win:
     - '(?i)(підпиш\w+|підписуйт\w+).{0,60}(розігра|вигра\w+ приз|отримай\w* приз)'
+  # Суспільне's daily running "N-й день війни" digest item: its TITLE crams the whole day's
+  # headlines into one multi-topic string, so ingesting it as one event gives a jumbled fact
+  # base and a Frankenstein post ("отримала 3,3 млрд + правила залізниці + 1668 днів"). Only
+  # these digests carry the war-day counter (verified against the DB: 0 legit posts do); the
+  # real single-topic events arrive from the same feed as their own items. High-precision
+  # (a 3-4 digit number right before "день війни"); guarded by false-positive tests.
+  war_day_digest:
+    - '(?i)\b\d{3,4}[-\s]*й?\s*день\s+війни\b'
 
 ipso:
   calls_to_share:

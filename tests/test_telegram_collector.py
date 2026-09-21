@@ -161,6 +161,63 @@ def test_realtime_new_message_and_album(pg_engine):
         assert len(media) == 2
 
 
+class FakeLiveClient(FakeClient):
+    """FakeClient + get_entity, for the live re-subscribe/backfill path."""
+
+    def __init__(self, messages, *, resolvable=None):
+        super().__init__(messages)
+        self._resolvable = resolvable          # set of handles that resolve; None = all
+        self.entity_calls: list[str] = []
+
+    async def get_entity(self, handle):
+        self.entity_calls.append(handle)
+        if self._resolvable is not None and handle not in self._resolvable:
+            raise RuntimeError(f"cannot resolve {handle}")
+        return handle
+
+
+def test_sync_and_backfill_new_picks_up_added_channels_without_restart(pg_engine):
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        _tg_source(s, "@a")
+        _tg_source(s, "@b")
+        s.commit()
+
+    collector = TelegramCollector(sf)
+    client = FakeLiveClient([_msg(id=1, message="x")])
+    n = asyncio.run(collector.sync_and_backfill_new(client, first_seed_limit=5))
+    assert n == 2                                          # both initial channels backfilled
+    assert set(collector._by_username) == {"a", "b"}       # live map seeded
+    assert len(collector._backfilled) == 2
+
+    with Session(pg_engine) as s:                          # a channel added while "running"
+        _tg_source(s, "@c")
+        s.commit()
+
+    n2 = asyncio.run(collector.sync_and_backfill_new(client, first_seed_limit=5))
+    assert n2 == 1                                         # only the new one is backfilled
+    assert set(collector._by_username) == {"a", "b", "c"}  # and it now streams (in the map)
+
+
+def test_sync_and_backfill_new_retries_unresolvable_channel(pg_engine):
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        _tg_source(s, "@ok")
+        _tg_source(s, "@bad")
+        s.commit()
+
+    collector = TelegramCollector(sf)
+    n = asyncio.run(collector.sync_and_backfill_new(
+        FakeLiveClient([_msg(id=1, message="x")], resolvable={"@ok"}), first_seed_limit=5))
+    assert n == 1                                          # @bad could not resolve -> skipped
+    assert set(collector._by_username) == {"ok", "bad"}    # but still streamable via the map
+
+    # a later sync retries @bad (not permanently given up) — now it resolves
+    n2 = asyncio.run(collector.sync_and_backfill_new(
+        FakeLiveClient([_msg(id=2, message="y")], resolvable={"@ok", "@bad"}), first_seed_limit=5))
+    assert n2 == 1                                         # @bad backfilled on retry; @ok skipped (done)
+
+
 def test_realtime_edit_and_delete(pg_engine):
     sf = make_session_factory(pg_engine)
     with Session(pg_engine) as s:

@@ -6,8 +6,8 @@ clustering, a freshly-formed event is compared against other recent events and, 
 it is the same story, MERGED into the earliest one (its items are reassigned, so the
 canonical event gains corroboration) instead of living on as a separate event. A
 merged duplicate is inert everywhere downstream (it carries `duplicate_of`, which
-clustering, story-linking, significance, fact base, fact-check, curation and
-editorial all skip), so nothing is spent on it.
+clustering, story-linking, fact base, fact-check, curation and editorial all skip),
+so nothing is spent on it.
 
 This reuses Phase A's signal machinery verbatim (`predup.candidate_signals` /
 `classify_signals` / the pairwise `TwinJudge`): only an exact content_hash merges
@@ -309,7 +309,6 @@ def _refresh_merged_event_evidence(session, event) -> None:
     ]
     event.independent_source_count = independent_source_count(source_items)
     event.fact_base = None
-    event.significance = None
 
     if event.risk_level in LEVELS:
         has_official = any(source.is_official or source.tier == "official" for _, source in rows)
@@ -365,7 +364,11 @@ def dedup_new_events(session_factory, dedup: "IngestDedup", *, enforce: bool = F
 
     stats = {"checked": 0, "merged": 0, "items_moved": 0, "unresolved": 0}
     for event_id in ids:
-        verdict = dedup.check(event_id)
+        try:
+            verdict = dedup.check(event_id)
+        except Exception as exc:  # noqa: BLE001 — one bad event must not abort the whole tick
+            log.warning("ingest dedup check failed", extra={"event_id": event_id, "error": str(exc)})
+            verdict = MergeVerdict(action=MERGE_UNRESOLVED, mode="error", reason=str(exc)[:200])
         stats["checked"] += 1
         if verdict.action == MERGE_UNRESOLVED:
             stats["unresolved"] += 1

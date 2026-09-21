@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -104,6 +105,42 @@ def _validate_config(config: PredupConfig) -> None:
 # signals (pure)
 # --------------------------------------------------------------------------- #
 
+# --- fact-fingerprint: typed distinctive numbers, a high-precision dedup booster ----
+# Measured: two events sharing >=2 typed number-facts are almost always the SAME event
+# even when their embeddings sit below the story-link threshold (cross-source
+# fragmentation — cosine 0.29-0.59). Used ONLY to widen the candidate net; the LLM still
+# decides, so numbers stay a booster, never a sole auto-merge.
+_NUM_MONEY = re.compile(r"(?:€\s*)?(\d+(?:[.,]\d+)?)\s*(?:млрд|мільярд\w*)", re.I)
+_NUM_AREA = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:км²|км2|кв\.?\s*км|квадратн\w*\s+кілометр\w*)", re.I)
+_NUM_TROOPS = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(тис\w*\s+)?(?:солдат\w*|військовослужбовц\w*|осіб|загарбник\w*)", re.I)
+_NUM_DRONES = re.compile(r"(\d+(?:[.,]\d+)?)\s*(тис\w*\s+)?(?:дрон\w*|безпілотник\w*|бпла|шахед\w*)", re.I)
+
+
+def _num_token(raw: str, thousands: bool = False) -> str:
+    try:
+        v = float(raw.replace(" ", "").replace(",", "."))
+    except ValueError:
+        return raw
+    return f"{v * 1000 if thousands else v:g}"
+
+
+def extract_number_facts(text: str | None) -> frozenset[str]:
+    """Typed distinctive numbers in the text (money-bn / area / troops / drones), normalized
+    so '1,5 тисячі солдатів' and '1500 солдатів' collapse to one token. Pure/offline."""
+    t = text or ""
+    fp: set[str] = set()
+    for m in _NUM_MONEY.finditer(t):
+        fp.add("M" + _num_token(m.group(1)))
+    for m in _NUM_AREA.finditer(t):
+        fp.add("A" + _num_token(m.group(1)))
+    for m in _NUM_TROOPS.finditer(t):
+        fp.add("T" + _num_token(m.group(1), bool(m.group(2))))
+    for m in _NUM_DRONES.finditer(t):
+        fp.add("D" + _num_token(m.group(1), bool(m.group(2))))
+    return frozenset(fp)
+
+
 @dataclass(frozen=True)
 class ItemSig:
     content_hash: str | None = None
@@ -121,6 +158,7 @@ class EventSig:
     centroid: list[float] | None = None
     story_id: int | None = None
     items: tuple[ItemSig, ...] = ()
+    number_facts: frozenset[str] = frozenset()   # typed distinctive numbers, for the fingerprint net
 
 
 @dataclass(frozen=True)
@@ -130,6 +168,7 @@ class CandidateSignals:
     exact_content_hash: bool = False
     forwarded_from_match: bool = False
     url_match: bool = False
+    shared_number_facts: int = 0
 
     def as_details(self) -> dict:
         return {
@@ -138,6 +177,7 @@ class CandidateSignals:
             "exact_content_hash": self.exact_content_hash,
             "forwarded_from_match": self.forwarded_from_match,
             "url_match": self.url_match,
+            "shared_number_facts": self.shared_number_facts,
         }
 
 
@@ -177,8 +217,11 @@ def candidate_signals(incoming: EventSig, candidate: EventSig) -> CandidateSigna
             if dist is None or d < dist:
                 dist = d
 
+    shared_numbers = len(incoming.number_facts & candidate.number_facts)
+
     return CandidateSignals(cosine=cos, simhash_distance=dist, exact_content_hash=exact_hash,
-                            forwarded_from_match=fwd_match, url_match=url_match)
+                            forwarded_from_match=fwd_match, url_match=url_match,
+                            shared_number_facts=shared_numbers)
 
 
 def in_candidate_net(sig: CandidateSignals, config: PredupConfig) -> bool:
@@ -189,6 +232,10 @@ def in_candidate_net(sig: CandidateSignals, config: PredupConfig) -> bool:
     if sig.cosine is not None and sig.cosine >= config.vector_candidate:
         return True
     if sig.simhash_distance is not None and sig.simhash_distance <= config.simhash_max:
+        return True
+    # fact-fingerprint: >=2 shared typed number-facts catches cross-source twins whose
+    # embeddings fell below the vector bar (the fragmentation the measurement found).
+    if sig.shared_number_facts >= 2:
         return True
     return False
 
@@ -324,7 +371,7 @@ class LLMTwinJudge:  # pragma: no cover - network
         incoming, candidate = _render_pair(pair)
         content = fill_prompt(
             self.prompt, incoming=incoming, candidate=candidate,
-            candidate_id=pair.candidate_event_id,
+            candidate_id=str(pair.candidate_event_id),
             candidate_state="опублікована" if pair.candidate_published else "чернетка")
         try:
             from newsroom.llmutil import chat_json
@@ -384,7 +431,9 @@ def load_event_sig(session, event_id: int) -> EventSig | None:
         content_hash=ch, simhash=sh, forwarded_from=ff, url=u,
         text_eligible=bool(normalize_text(title) or normalize_text(text)),
     ) for ch, sh, ff, u, title, text in rows)
-    return EventSig(event_id=event_id, centroid=ev.centroid, story_id=ev.story_id, items=items)
+    blob = "\n".join([ev.title or ""] + [f"{t or ''}\n{x or ''}" for _c, _s, _f, _u, t, x in rows])
+    return EventSig(event_id=event_id, centroid=ev.centroid, story_id=ev.story_id, items=items,
+                    number_facts=extract_number_facts(blob))
 
 
 def load_event_sigs(session, event_ids) -> dict[int, EventSig]:
@@ -399,10 +448,11 @@ def load_event_sigs(session, event_ids) -> dict[int, EventSig]:
     ids = list(dict.fromkeys(event_ids))
     if not ids:
         return {}
-    meta = {eid: (centroid, story_id) for eid, centroid, story_id in session.execute(
-        select(Event.id, Event.centroid, Event.story_id).where(Event.id.in_(ids))
+    meta = {eid: (centroid, story_id, title) for eid, centroid, story_id, title in session.execute(
+        select(Event.id, Event.centroid, Event.story_id, Event.title).where(Event.id.in_(ids))
     ).all()}
     items_by_event: dict[int, list[ItemSig]] = {eid: [] for eid in meta}
+    text_by_event: dict[int, list[str]] = {eid: [meta[eid][2] or ""] for eid in meta}
     rows = session.execute(
         select(EventItem.event_id, Item.content_hash, Item.simhash, Item.forwarded_from,
                Item.url, Item.title, Item.text)
@@ -414,9 +464,11 @@ def load_event_sigs(session, event_ids) -> dict[int, EventSig]:
             items_by_event[eid].append(ItemSig(
                 content_hash=ch, simhash=sh, forwarded_from=ff, url=u,
                 text_eligible=bool(normalize_text(title) or normalize_text(text))))
+            text_by_event[eid].append(f"{title or ''}\n{text or ''}")
     return {eid: EventSig(event_id=eid, centroid=c, story_id=sid,
-                          items=tuple(items_by_event.get(eid, ())))
-            for eid, (c, sid) in meta.items()}
+                          items=tuple(items_by_event.get(eid, ())),
+                          number_facts=extract_number_facts("\n".join(text_by_event.get(eid, ()))))
+            for eid, (c, sid, _title) in meta.items()}
 
 
 def find_publish_candidates(session, incoming_event_id: int, *, config: PredupConfig):

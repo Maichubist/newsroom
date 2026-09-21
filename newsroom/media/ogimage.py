@@ -19,7 +19,15 @@ from typing import Callable
 
 log = logging.getLogger("newsroom.media.ogimage")
 
-_USER_AGENT = "Mozilla/5.0 (compatible; newsroom/0.1; +https://example.org)"
+# A real browser UA: many sites (Cloudflare, Суспільне, …) 403 a bot-ish UA, which was
+# failing the og:image page fetch ~600 times (no real picture reached the post).
+_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_BROWSER_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "uk,en;q=0.8",
+}
 _META_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'(property|name)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 _CONTENT_RE = re.compile(r'content\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
@@ -52,7 +60,7 @@ def extract_og_image(html: str | None) -> str | None:
 def _http_fetch_text(url: str, *, timeout: float = 20.0) -> str:  # pragma: no cover - network
     import httpx
 
-    resp = httpx.get(url, timeout=timeout, follow_redirects=True, headers={"User-Agent": _USER_AGENT})
+    resp = httpx.get(url, timeout=timeout, follow_redirects=True, headers=_BROWSER_HEADERS)
     resp.raise_for_status()
     return resp.text
 

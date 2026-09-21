@@ -75,7 +75,7 @@ class Event(Base):
     topic_path: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     topic_leaf_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
 
-    significance: Mapped[float | None] = mapped_column(Float, nullable=True)  # T1 gate score (analyze/significance.py)
+    significance: Mapped[float | None] = mapped_column(Float, nullable=True)  # deprecated (significance retired); column kept per additive-only migrations
     curated: Mapped[str | None] = mapped_column(String(16), nullable=True)  # publish|hold — editorial curation (editorial/curation.py)
     duplicate_of: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # same-story canonical event id (LLM batch dedup); non-null = don't post
 
@@ -111,6 +111,9 @@ class TaxonomyNode(Base):
     heat: Mapped[float] = mapped_column(Float, default=0.0)
     heat_events: Mapped[int] = mapped_column(Integer, default=0)   # events under this node in the heat window
     heat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # audience-engagement popularity (competitor engagement, NO recency), normalized within
+    # the node's depth level to [0,1]; recomputed with heat. Curation reads it at L2.
+    demand: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
