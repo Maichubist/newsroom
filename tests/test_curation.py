@@ -50,6 +50,16 @@ def test_parse_ranking_ignores_unknown_ids_and_bad_json():
     assert parse_ranking("garbage", {1, 2}) == {1: "hold", 2: "hold"}
 
 
+def test_freshness_label_buckets():
+    from newsroom.editorial.curation import _freshness_label
+
+    assert _freshness_label(None) == "невідомо"
+    assert _freshness_label(2) == "свіже"
+    assert _freshness_label(12) == "сьогодні"
+    assert _freshness_label(30) == "кілька днів"
+    assert _freshness_label(200) == "застаріле"
+
+
 # --- curate_pending (pg) ------------------------------------------------------
 
 class FakeRanker:
@@ -191,6 +201,36 @@ def test_curate_pending_attaches_l2_heat_and_demand_to_ranker(pg_engine):
     assert ranker.candidates
     assert ranker.candidates[0].heat == pytest.approx(0.9)      # L2 node heat
     assert ranker.candidates[0].demand == pytest.approx(0.7)    # L2 node demand
+
+
+@pytest.mark.pg
+def test_curate_pending_attaches_freshness_from_publish_date(pg_engine):
+    # freshness is the age of the LATEST source publish date, not our fetch time —
+    # an old-dated article served today reads as stale.
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, EventItem, Item, Source
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://a/feed", name="A", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        ev = Event(status="confirmed", risk_level="low", rubric="economy", title="Стара новина",
+                   first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        it = Item(source_id=src.id, external_id="old1", content_hash="old1".ljust(64, "0"), title="t",
+                  published_at=now - dt.timedelta(days=5))
+        s.add(it)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id))
+        eid = ev.id
+        s.commit()
+
+    ranker = FakeRanker({eid: "hold"})
+    curate_pending(sf, ranker, window_hours=6)
+    assert ranker.candidates and ranker.candidates[0].age_hours == pytest.approx(120, abs=1)
 
 
 @pytest.mark.pg
