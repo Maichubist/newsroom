@@ -28,15 +28,25 @@ log = logging.getLogger("newsroom.llm")
 # trade detail for size.
 MAX_LOG_TEXT = 4000
 
-# USD price per 1,000,000 tokens. APPROXIMATE — edit to match the current OpenAI pricing.
-# input = uncached prompt tokens, cached_input = prompt-cache hits (discounted), output =
-# completion tokens (embeddings have no output). Unknown model -> cost 0 (tokens still
-# stored, so cost can be recomputed later).
+# USD price per 1,000,000 tokens. input = uncached prompt tokens, cached_input = prompt-cache
+# hits (discounted), output = completion tokens (embeddings have no output). Unknown model ->
+# cost 0 (tokens still stored, so cost can be recomputed). Verified against OpenAI's pricing
+# page on 2026-09-21: gpt-4o-mini and gpt-4o unchanged; the newer cheap models are added so a
+# model swap still costs correctly. Embeddings kept at their long-stable rate (the current
+# page no longer surfaces an embeddings table). EDIT when pricing or the model changes.
 PRICES: dict[str, dict[str, float]] = {
+    # what the pipeline uses today (gpt-4o-mini for every LLM op, small for embeddings)
     "gpt-4o-mini":            {"input": 0.15, "cached_input": 0.075, "output": 0.60},
-    "gpt-4o":                 {"input": 2.50, "cached_input": 1.25, "output": 10.00},
     "text-embedding-3-small": {"input": 0.02, "cached_input": 0.02, "output": 0.0},
     "text-embedding-3-large": {"input": 0.13, "cached_input": 0.13, "output": 0.0},
+    # priced so switching the model still computes cost. gpt-5-nano is now cheaper AND newer
+    # than gpt-4o-mini ($0.05/$0.40 vs $0.15/$0.60) — a candidate swap for the cheap ops.
+    "gpt-4o":                 {"input": 2.50, "cached_input": 1.25, "output": 10.00},
+    "gpt-4.1-mini":           {"input": 0.40, "cached_input": 0.10, "output": 1.60},
+    "gpt-4.1-nano":           {"input": 0.10, "cached_input": 0.025, "output": 0.40},
+    "gpt-5-mini":             {"input": 0.25, "cached_input": 0.025, "output": 2.00},
+    "gpt-5-nano":             {"input": 0.05, "cached_input": 0.005, "output": 0.40},
+    "gpt-5.6-luna":           {"input": 0.20, "cached_input": 0.02, "output": 1.20},
 }
 
 
