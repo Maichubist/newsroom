@@ -23,6 +23,7 @@ from newsroom.publishers.predup import (
     TwinJudgment,
     candidate_signals,
     classify_signals,
+    extract_number_facts,
     find_publish_candidates,
     in_candidate_net,
     load_predup_config,
@@ -57,8 +58,9 @@ def test_load_predup_config_missing_file(tmp_path):
 
 # --- candidate_signals (offline) ----------------------------------------------
 
-def _ev(eid, *, centroid=None, items=()):
-    return EventSig(event_id=eid, centroid=centroid, items=tuple(items))
+def _ev(eid, *, centroid=None, items=(), number_facts=()):
+    return EventSig(event_id=eid, centroid=centroid, items=tuple(items),
+                    number_facts=frozenset(number_facts))
 
 
 def test_candidate_signals_exact_content_hash():
@@ -100,6 +102,35 @@ CFG = PredupConfig(vector_candidate=0.55, simhash_max=6)
 
 def test_classify_only_exact_hash_is_auto_duplicate():
     assert classify_signals(CandidateSignals(exact_content_hash=True), CFG) == CLASS_AUTO_DUPLICATE
+
+
+# --- fact-fingerprint (offline) -----------------------------------------------
+
+def test_extract_number_facts_typed_and_normalized():
+    fp = extract_number_facts(
+        "Україна отримала 3,3 млрд євро; зачистили 85 км²; втратили 1,5 тисячі солдатів; 12 тисяч дронів")
+    assert {"M3.3", "A85", "T1500", "D12000"} <= fp
+    # '1500 солдатів' collapses to the same token as '1,5 тисячі солдатів'
+    assert extract_number_facts("1500 солдатів") == frozenset({"T1500"})
+    assert extract_number_facts("нема чисел") == frozenset()
+
+
+def test_number_facts_widen_the_candidate_net():
+    a = _ev(1, number_facts={"T1500", "A75"})
+    b = _ev(2, number_facts={"T1500", "A75", "M3.3"})
+    sig = candidate_signals(a, b)
+    assert sig.shared_number_facts == 2
+    assert in_candidate_net(sig, CFG) is True            # >=2 shared -> a candidate (LLM decides)
+    # one shared number is NOT enough on its own (a lone "1500 втрат" is common)
+    c = _ev(3, number_facts={"T1500"})
+    assert candidate_signals(a, c).shared_number_facts == 1
+    assert in_candidate_net(candidate_signals(a, c), CFG) is False
+
+
+def test_number_facts_are_grey_not_auto():
+    # a fingerprint match is a candidate for the LLM arbiter, never a no-LLM auto-merge
+    sig = candidate_signals(_ev(1, number_facts={"T1500", "A75"}), _ev(2, number_facts={"T1500", "A75"}))
+    assert classify_signals(sig, CFG) == CLASS_GREY
 
 
 def test_classify_forwarded_from_is_grey_not_auto():
