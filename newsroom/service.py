@@ -52,10 +52,6 @@ def story_updates_enabled() -> bool:
     return os.getenv("STORY_UPDATES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
-def significance_enabled() -> bool:
-    return os.getenv("SIGNIFICANCE_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
-
-
 def dedup_enabled() -> bool:
     return os.getenv("DEDUP_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -226,19 +222,16 @@ def build_factbase_builder_from_env(session_factory):  # pragma: no cover — ne
 
 
 async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30.0,
-                           significance_threshold: float | None = None,
                            require_dedup_settled: bool = False,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Build the shared fact base for publishable events until stopped. Runs
-    before fact-check and editorial so both work from one viewpoint. Skips
-    low-significance events when a threshold is set. When require_dedup_settled,
+    """Build the shared fact base for publishable events until stopped. Runs before
+    fact-check and editorial so both work from one viewpoint. When require_dedup_settled,
     waits for the ingest-dedup verdict so a duplicate is merged first. Nothing published."""
     from newsroom.factbase import build_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(build_pending, session_factory, builder,
-                                            significance_threshold=significance_threshold,
                                             require_dedup_settled=require_dedup_settled)
             if stats.get("events"):
                 log.info("factbase tick", extra=bind(**stats))
@@ -275,21 +268,18 @@ def build_factchecker_from_env(session_factory):  # pragma: no cover — needs O
 
 
 async def factcheck_forever(session_factory, checker, *, tick_seconds: float = 30.0,
-                            significance_threshold: float | None = None,
                             risk_levels: tuple[str, ...] | None = None,
                             require_dedup_settled: bool = False,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Fact-check publishable events (claims -> evidence -> verdict) until stopped.
-    Runs before editorial so drafts can build on verified claims. Skips
-    low-significance events when a threshold is set (biggest token saving); with
-    `risk_levels` set, only checks those risk levels (FACTCHECK_HIGH_ONLY). When
-    require_dedup_settled, waits for the ingest-dedup verdict first. Nothing published."""
+    """Fact-check publishable events (claims -> evidence -> verdict) until stopped. Runs
+    before editorial so drafts can build on verified claims. With `risk_levels` set, only
+    checks those risk levels (FACTCHECK_HIGH_ONLY). When require_dedup_settled, waits for
+    the ingest-dedup verdict first. Nothing published."""
     from newsroom.factcheck import check_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(check_pending, session_factory, checker,
-                                            significance_threshold=significance_threshold,
                                             risk_levels=risk_levels,
                                             require_dedup_settled=require_dedup_settled)
             if stats.get("events"):
@@ -339,19 +329,16 @@ def build_story_updater_from_env(session_factory):  # pragma: no cover — needs
 
 
 async def story_updates_forever(session_factory, updater, *, tick_seconds: float = 30.0,
-                                significance_threshold: float | None = None,
                                 require_dedup_settled: bool = False,
                                 stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Classify how each new event moves its story (update_type) and update the
-    running summary, before editorial drafts posts. Skips low-significance events
-    when a threshold is set. When require_dedup_settled, waits for the ingest-dedup
-    verdict first. Nothing is published."""
+    """Classify how each new event moves its story (update_type) and update the running
+    summary, before editorial drafts posts. When require_dedup_settled, waits for the
+    ingest-dedup verdict first. Nothing is published."""
     from newsroom.editorial import classify_pending
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(classify_pending, session_factory, updater,
-                                            significance_threshold=significance_threshold,
                                             require_dedup_settled=require_dedup_settled)
             if stats.get("classified"):
                 log.info("story-update tick", extra=bind(**stats))
@@ -374,22 +361,6 @@ def build_editorial_pipeline_from_env(session_factory):  # pragma: no cover — 
         ai_accent_patterns=load_ai_accent(CONFIG_DIR / "ai_accent.yaml"),
         spine=load_spine(CONFIG_DIR / "taxonomy_spine.yaml"),
     )
-
-
-async def significance_forever(session_factory, config, *, tick_seconds: float = 30.0,
-                               stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Score each postable event's significance (T1 gate) before editorial, so
-    niche/minor news is skipped. Deterministic — no LLM. Nothing is published."""
-    from newsroom.analyze.significance import score_pending
-
-    while not (stop and stop.is_set()):
-        try:
-            stats = await asyncio.to_thread(score_pending, session_factory, config)
-            if stats.get("scored"):
-                log.info("significance tick", extra=bind(**stats))
-        except Exception:
-            log.exception("significance tick failed")
-        await asyncio.sleep(tick_seconds)
 
 
 def build_dedup_grouper_from_env():  # pragma: no cover — needs OpenAI
@@ -452,11 +423,10 @@ def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
 
 
 async def curation_forever(session_factory, ranker, *, grouper=None, digest_config=None,
-                           significance_threshold: float | None = None,
                            window_hours: int = 6, tick_seconds: float = 120.0,
                            require_dedup_settled: bool = False, dedup_every: int = 15,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Mark recent significant events publish/hold (must-publish deterministically,
+    """Mark recent events publish/hold (must-publish deterministically,
     the rest by comparative LLM ranking), before editorial. Only publish-marked
     events are drafted — the count follows the news, not a fixed rate.
 
@@ -480,8 +450,7 @@ async def curation_forever(session_factory, ranker, *, grouper=None, digest_conf
                 if dstats.get("duplicates"):
                     log.info("dedup tick", extra=bind(**dstats))
             stats = await asyncio.to_thread(
-                curate_pending, session_factory, ranker,
-                significance_threshold=significance_threshold, window_hours=window_hours,
+                curate_pending, session_factory, ranker, window_hours=window_hours,
                 require_dedup_settled=require_dedup_settled)
             if stats.get("curated"):
                 log.info("curation tick", extra=bind(**stats))
@@ -510,20 +479,16 @@ async def digest_forever(session_factory, publisher, *, tick_seconds: float = 30
 
 
 async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 30.0,
-                            significance_threshold: float | None = None,
                             require_curation: bool = False,
                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Draft posts for publishable events until stopped. When a significance
-    threshold is given, events scored below it are skipped (T1 gate); with
-    require_curation, only events the curation marked publish are drafted. Nothing is
-    published."""
+    """Draft posts for publishable events until stopped. With require_curation, only
+    events the curation marked publish are drafted. Nothing is published."""
     from newsroom.editorial import produce_drafts
 
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(
                 produce_drafts, session_factory, pipeline,
-                significance_threshold=significance_threshold,
                 require_curation=require_curation)
             if stats.get("produced"):
                 log.info("editorial tick", extra=bind(**stats))
@@ -925,23 +890,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         sync_sources(s, load_sources(CONFIG_PATH))
         s.commit()
 
-    # Significance threshold is loaded once and shared: the scoring loop uses the
-    # full config, while factbase / factcheck / story-updates / editorial take just
-    # the threshold to skip low-significance events (no tokens on unpostable news).
-    significance_threshold = None
-    sig_config = None
-    if significance_enabled():
-        from newsroom.analyze.significance import load_significance_config
-
-        sig_config = load_significance_config(CONFIG_DIR / "significance.yaml")
-        significance_threshold = sig_config.threshold
-
     tasks = [asyncio.create_task(poll_rss_forever(session_factory))]
-    if sig_config is not None:
-        tasks.append(asyncio.create_task(significance_forever(session_factory, sig_config)))
-        log.info("significance gate enabled", extra=bind(threshold=significance_threshold))
-    else:
-        log.info("significance gate disabled (SIGNIFICANCE_ENABLED off)")
     telegram_collector = None
     if telegram_enabled():
         telegram_collector = TelegramCollector(session_factory)
@@ -1006,8 +955,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if factbase_enabled():
         builder = build_factbase_builder_from_env(session_factory)
         tasks.append(asyncio.create_task(factbase_forever(
-            session_factory, builder, significance_threshold=significance_threshold,
-            require_dedup_settled=dedup_gate)))
+            session_factory, builder, require_dedup_settled=dedup_gate)))
         log.info("fact base enabled")
     else:
         log.info("fact base disabled (FACTBASE_ENABLED off)")
@@ -1016,7 +964,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         checker = build_factchecker_from_env(session_factory)
         fc_risk = ("high", "critical") if factcheck_high_only() else None
         tasks.append(asyncio.create_task(factcheck_forever(
-            session_factory, checker, significance_threshold=significance_threshold,
+            session_factory, checker,
             risk_levels=fc_risk, require_dedup_settled=dedup_gate)))
         log.info("fact-checking enabled", extra=bind(high_only=bool(fc_risk)))
     else:
@@ -1049,8 +997,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if story_updates_enabled():
         updater = build_story_updater_from_env(session_factory)
         tasks.append(asyncio.create_task(story_updates_forever(
-            session_factory, updater, significance_threshold=significance_threshold,
-            require_dedup_settled=dedup_gate)))
+            session_factory, updater, require_dedup_settled=dedup_gate)))
         log.info("story updates enabled")
     else:
         log.info("story updates disabled (STORY_UPDATES_ENABLED off)")
@@ -1086,7 +1033,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         ranker = build_editorial_ranker_from_env()
         tasks.append(asyncio.create_task(curation_forever(
             session_factory, ranker, grouper=grouper, digest_config=curation_digest_config,
-            significance_threshold=significance_threshold, require_dedup_settled=dedup_gate)))
+            require_dedup_settled=dedup_gate)))
         log.info("editorial curation enabled", extra=bind(digest_reserve=curation_digest_config is not None))
     else:
         if grouper is not None:            # curation off: dedup still needs a loop
@@ -1096,7 +1043,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if editorial_enabled():
         pipeline = build_editorial_pipeline_from_env(session_factory)
         tasks.append(asyncio.create_task(editorial_forever(
-            session_factory, pipeline, significance_threshold=significance_threshold,
+            session_factory, pipeline,
             require_curation=curation_enabled())))
         log.info("editorial drafting enabled", extra=bind(require_curation=curation_enabled()))
     else:

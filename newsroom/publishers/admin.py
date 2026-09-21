@@ -386,7 +386,6 @@ def report_event(session_factory, event_id: int) -> str:
             .order_by(Decision.id)
         ).all()
     head = (f"event {event_id}: {ev.status}/{ev.risk_level or '?'}/{ev.rubric or '?'} "
-            f"sig={ev.significance if ev.significance is not None else '—'} "
             f"curated={ev.curated or '—'} dup_of={ev.duplicate_of or '—'}\n"
             f"«{(ev.title or '')[:80]}»")
     if not decisions:

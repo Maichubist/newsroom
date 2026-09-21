@@ -12,8 +12,7 @@ big-news window yields more. Two paths:
     Comparative-in-a-batch, not an absolute score (CLAUDE.md).
 
 Curation gates *drafting*: only publish-marked events are drafted, so we don't spend
-generation tokens on posts we would not publish. The significance gate still runs
-first as a cheap pre-filter, so the ranker never sees obvious niche.
+generation tokens on posts we would not publish.
 
 The vocabulary, must_publish and parsing are pure and offline-tested; the ranker is
 pluggable (LLM in prod, fake in tests).
@@ -50,9 +49,8 @@ class Candidate:
     title: str
     rubric: str | None = None
     risk_level: str | None = None
-    significance: float | None = None
     facts: list[str] = field(default_factory=list)
-    demand: float | None = None        # learned audience demand for the rubric (0..1), or None
+    demand: float | None = None        # learned audience demand (0..1), or None
     heat: float | None = None          # data-driven hot-topic heat for this event (0..1), or None
     age_hours: float | None = None     # hours since the latest SOURCE publish date (freshness), or None
 
@@ -258,16 +256,15 @@ def _load_event_freshness(session, event_ids, now) -> dict[int, float]:
     return out
 
 
-def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_threshold: float | None = None,
+def curate_pending(session_factory, ranker: "EditorialRanker", *,
                    window_hours: int = 6, limit: int = 40, require_dedup_settled: bool = False,
                    dedup_grace_seconds: float = 300.0) -> dict[str, int]:
     """One curation tick: mark recent, not-yet-curated events publish/hold. Selection is
     by popularity (charter v0.3): demand × heat feed the ranker, substance (the facts
     shown per candidate) keeps content-free events out. must-publish (refutation) events
     are marked deterministically; the rest are ranked comparatively by the LLM. Only
-    publish-marked events are later drafted. `significance_threshold` is accepted for
-    signature stability but no longer gates — significance is retired as the interest
-    gate. With require_dedup_settled, an event waits for the ingest-dedup verdict first."""
+    publish-marked events are later drafted. With require_dedup_settled, an event waits
+    for the ingest-dedup verdict first."""
     import datetime as dt
 
     from sqlalchemy import select
@@ -284,10 +281,9 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         Event.duplicate_of.is_(None),        # skip events marked duplicate (LLM batch dedup)
         Event.first_seen_at >= cutoff,
     ]
-    # significance is retired as the interest gate (charter v0.3): selection is by
-    # popularity. The ranker weighs demand × heat and sees each candidate's facts, so a
-    # content-free event is held on the spot and never becomes a post (content_is_publishable
-    # is the downstream backstop). `significance_threshold` no longer filters here.
+    # selection is by popularity (charter v0.3): the ranker weighs demand × heat and sees
+    # each candidate's facts, so a content-free event is held on the spot and never becomes
+    # a post (content_is_publishable is the downstream backstop).
     dedup_clause = dedup_settled_clause(require_dedup_settled,
                                         now - dt.timedelta(seconds=dedup_grace_seconds))
     if dedup_clause is not None:
@@ -301,10 +297,9 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
-                   Event.significance, Event.fact_base, Event.update_type)
+                   Event.fact_base, Event.update_type)
             .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
-            # newest first (significance no longer orders): at scale the freshest events
-            # reach the ranker before the window's tail.
+            # newest first: at scale the freshest events reach the ranker before the window's tail.
             .order_by(Event.first_seen_at.desc(), Event.id).limit(limit)
         ).all()
         if not rows:
@@ -319,7 +314,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
     decisions: dict[int, str] = {}
     must_ids: set[int] = set()
     to_rank: list[Candidate] = []
-    for eid, title, rubric, risk, sig, fact_base, update_type in rows:
+    for eid, title, rubric, risk, fact_base, update_type in rows:
         # only a refutation skips the editor (a correction must go out); everything else,
         # breaking critical news included, is judged comparatively by the ranker
         if must_publish(update_type=update_type):
@@ -331,7 +326,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *, significance_t
             # topic has no engagement data yet (or the event is unplaced on the pyramid).
             demand = node_demand or (demand_by_rubric.get(rubric) if rubric else None)
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
-                                     significance=sig, facts=_facts_brief(fact_base),
+                                     facts=_facts_brief(fact_base),
                                      demand=demand, heat=heat or None, age_hours=freshness.get(eid)))
     must_count = len(decisions)
 

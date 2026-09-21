@@ -6,8 +6,8 @@ clustering, a freshly-formed event is compared against other recent events and, 
 it is the same story, MERGED into the earliest one (its items are reassigned, so the
 canonical event gains corroboration) instead of living on as a separate event. A
 merged duplicate is inert everywhere downstream (it carries `duplicate_of`, which
-clustering, story-linking, significance, fact base, fact-check, curation and
-editorial all skip), so nothing is spent on it.
+clustering, story-linking, fact base, fact-check, curation and editorial all skip),
+so nothing is spent on it.
 
 This reuses Phase A's signal machinery verbatim (`predup.candidate_signals` /
 `classify_signals` / the pairwise `TwinJudge`): only an exact content_hash merges
@@ -309,7 +309,6 @@ def _refresh_merged_event_evidence(session, event) -> None:
     ]
     event.independent_source_count = independent_source_count(source_items)
     event.fact_base = None
-    event.significance = None
 
     if event.risk_level in LEVELS:
         has_official = any(source.is_official or source.tier == "official" for _, source in rows)

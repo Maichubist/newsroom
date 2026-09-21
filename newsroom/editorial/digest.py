@@ -155,8 +155,8 @@ def due_windows(now: dt.datetime, last_map: dict[str, str],
 def reserve_digests(session_factory, config: DigestConfig, *, window_hours: int = 48,
                     limit: int = 200) -> dict[str, int]:
     """Reserve postable digest-class events (curated='digest'), so they are not posted
-    individually. NOT significance-gated on purpose: routine events fall below the bar,
-    but aggregated in a digest they are worth publishing. Records the matched category."""
+    individually. These routine events are individually minor, but aggregated in a digest
+    they are worth publishing. Records the matched category."""
     from sqlalchemy import select
 
     from newsroom.models import Decision, Event, Publication

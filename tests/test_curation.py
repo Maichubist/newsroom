@@ -106,7 +106,7 @@ def test_critical_events_go_through_the_ranker(pg_engine):
         s.commit()
 
     ranker = FakeRanker({mem_id: "hold", break_id: "publish"})
-    curate_pending(sf, ranker, significance_threshold=0.55)
+    curate_pending(sf, ranker)
 
     assert mem_id in ranker.seen and break_id in ranker.seen   # both went through the editor
     with Session(pg_engine) as s:
@@ -132,7 +132,7 @@ def test_curate_pending_passes_learned_demand_to_ranker(pg_engine):
         s.commit()
 
     ranker = FakeRanker({eid: "publish"})
-    curate_pending(sf, ranker, significance_threshold=0.55, window_hours=6)
+    curate_pending(sf, ranker, window_hours=6)
     assert ranker.candidates and ranker.candidates[0].demand == pytest.approx(0.9)   # demand attached
 
 
@@ -167,7 +167,7 @@ def test_attack_reserved_to_digest_beats_must_publish(pg_engine):
 
     reserve_digests(sf, cfg)                       # tick step 1
     ranker = FakeRanker({})
-    curate_pending(sf, ranker, significance_threshold=0.55)   # tick step 2
+    curate_pending(sf, ranker)   # tick step 2
     with Session(pg_engine) as s:
         assert s.get(Event, eid).curated == "digest"   # reserved, not must-published
     assert eid not in ranker.seen

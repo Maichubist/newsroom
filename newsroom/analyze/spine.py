@@ -5,7 +5,7 @@ roots) with ONE stable spine. Beneath it the pyramid stays dynamic; the spine is
 POLICY (risk floor, human oversight), not news structure, so it changes rarely and
 is human-owned. Loaded from config/taxonomy_spine.yaml.
 
-Pure/offline (like risk.py, significance.py): parse + validate + resolve, no DB, no
+Pure/offline (like risk.py): parse + validate + resolve, no DB, no
 network. `resolve()` maps any old flat rubric (English) OR old pyramid root
 (Ukrainian) OR a slug to its canonical spine slug via the alias index.
 """
