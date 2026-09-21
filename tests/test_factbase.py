@@ -46,6 +46,17 @@ def test_parse_facts_invalid_is_none():
     assert parse_facts('{"facts": "not a list"}') is None
 
 
+def test_parse_facts_modality_attribution_time_frame():
+    facts = parse_facts(
+        '{"facts": [{"text": "Росія готує мобілізацію 600 тис.", "modality": "statement",'
+        ' "attribution": "українська розвідка", "time_frame": "у 2026-2027"},'
+        ' {"text": "Естонія може закрити кордон", "modality": "MARTIAN"}]}')
+    assert facts[0].modality == "statement"
+    assert facts[0].attribution == "українська розвідка" and facts[0].time_frame == "у 2026-2027"
+    assert facts[1].modality == "fact"          # unknown modality clamps to fact
+    assert facts[1].attribution is None and facts[1].time_frame is None
+
+
 # --- merge_facts (offline, injected vectors) ----------------------------------
 
 def test_merge_counts_independent_sources():
@@ -99,11 +110,26 @@ def test_merge_skips_reactions():
     assert [m.text for m in merged] == ["факт"]
 
 
+def test_merge_keeps_cautious_modality_and_fills_attribution():
+    # one source hedges (statement) -> the merged fact is NOT presented as an established fact,
+    # regardless of order; attribution/time_frame are filled from whichever variant has them.
+    a = VectorFact(SourceFact("Росія готує мобілізацію", modality="statement",
+                              attribution="розвідка", time_frame="2026-2027"), source_id=1, vector=_axis_vec(0))
+    b = VectorFact(SourceFact("РФ мобілізує", modality="fact"), source_id=2, vector=_axis_vec(0))
+    for items in ([a, b], [b, a]):
+        merged = merge_facts(items, threshold=0.85)
+        assert len(merged) == 1 and merged[0].modality == "statement"
+        assert merged[0].attribution == "розвідка" and merged[0].time_frame == "2026-2027"
+
+
 def test_fact_base_json_shape():
     merged = [MergedFact(text="ф", source_ids=[1, 2], confirmed_by=2, values=[13.0],
-                         divergent=False, variants=["ф"])]
+                         divergent=False, variants=["ф"], modality="statement",
+                         attribution="Мінфін", time_frame="2026")]
     base = fact_base_json(merged, reactions=[(3, SourceFact("реакція", kind="reaction"))])
     assert base["facts"][0]["confirmed_by"] == 2 and base["facts"][0]["source_ids"] == [1, 2]
+    assert base["facts"][0]["modality"] == "statement" and base["facts"][0]["attribution"] == "Мінфін"
+    assert base["facts"][0]["time_frame"] == "2026"
     assert base["reactions"] == [{"source_id": 3, "text": "реакція", "unit": None}]
 
 

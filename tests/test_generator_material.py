@@ -65,3 +65,18 @@ def test_facts_sorted_by_confirmation_and_marks_divergence():
 def test_facts_from_missing_base_is_empty():
     assert _facts_from_base(None) == []
     assert _facts_from_base({"facts": []}) == []
+
+
+def test_facts_from_base_carries_modality_markers():
+    # modality/attribution/time-frame reach the generator so it can't distort them
+    fb = {"facts": [
+        {"text": "Україна отримала 3,3 млрд євро", "modality": "fact", "confirmed_by": 2},
+        {"text": "Росія готує мобілізацію 600 тис.", "modality": "statement",
+         "attribution": "українська розвідка", "time_frame": "у 2026-2027", "confirmed_by": 1},
+        {"text": "Естонія може закрити кордон", "modality": "forecast", "confirmed_by": 1},
+    ]}
+    facts = _facts_from_base(fb)
+    joined = "\n".join(facts)
+    assert "[заява: українська розвідка]" in joined and "[рамка: у 2026-2027]" in joined
+    assert "[прогноз]" in joined
+    assert "Україна отримала 3,3 млрд євро" in facts   # a plain fact carries no marker

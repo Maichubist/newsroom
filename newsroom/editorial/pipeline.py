@@ -262,9 +262,21 @@ def _facts_from_base(fact_base, *, limit: int = 12) -> list[str]:
     out: list[str] = []
     for f in rows[:limit]:
         text = str(f["text"]).strip()
+        # carry modality/attribution/time-frame to the generator so it preserves them:
+        # a statement stays attributed ("за даними X"), a forecast keeps "може/планує",
+        # and the time frame is never dropped (charter: don't overstate / don't distort).
+        modality = str(f.get("modality") or "fact").strip().lower()
+        attribution = str(f.get("attribution")).strip() if f.get("attribution") else ""
+        time_frame = str(f.get("time_frame")).strip() if f.get("time_frame") else ""
+        prefix = ""
+        if modality == "statement":
+            prefix = f"[заява{': ' + attribution if attribution else ''}] "
+        elif modality == "forecast":
+            prefix = f"[прогноз{': ' + attribution if attribution else ''}] "
+        suffix = f" [рамка: {time_frame}]" if time_frame else ""
         if f.get("divergent"):
-            text += " (джерела розходяться в цифрах)"
-        out.append(text)
+            suffix += " (джерела розходяться в цифрах)"
+        out.append(prefix + text + suffix)
     return out
 
 
