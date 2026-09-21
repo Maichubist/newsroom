@@ -886,6 +886,12 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     init_db(engine)
     session_factory = make_session_factory(engine)
 
+    # record the cost of every LLM call (completions + embeddings) to the llm_calls table
+    from newsroom.llm_recorder import make_db_recorder
+    from newsroom.llmutil import set_usage_recorder
+
+    set_usage_recorder(make_db_recorder(session_factory))
+
     with session_factory() as s:
         sync_sources(s, load_sources(CONFIG_PATH))
         s.commit()

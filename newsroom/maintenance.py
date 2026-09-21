@@ -39,3 +39,21 @@ def prune_decisions(session_factory, *, older_than_days: int = 90,
     if deleted:
         log.info("pruned decisions", extra={"deleted": deleted, "older_than_days": older_than_days})
     return deleted
+
+
+def prune_llm_calls(session_factory, *, older_than_days: int = 90) -> int:
+    """Delete llm_calls rows older than `older_than_days`. The cost table grows with every
+    call and stores capped request/response text, so age out old detail on a schedule; a
+    generous default window keeps recent history for analysis. Safe to run repeatedly."""
+    from sqlalchemy import delete
+
+    from newsroom.models import LlmCall
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=older_than_days)
+    with session_factory() as s:
+        result = s.execute(delete(LlmCall).where(LlmCall.created_at < cutoff))
+        s.commit()
+        deleted = int(result.rowcount or 0)
+    if deleted:
+        log.info("pruned llm_calls", extra={"deleted": deleted, "older_than_days": older_than_days})
+    return deleted

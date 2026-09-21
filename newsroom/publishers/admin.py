@@ -256,6 +256,23 @@ def report_review(session_factory, *, limit: int = 15) -> str:
                 + _table(["pub", "event", "headline", "причина"], data))
 
 
+def report_llm_cost(session_factory, *, days: int = 7) -> str:
+    """LLM spend over the last `days`: total, then a breakdown by op and by model. The full
+    per-day / per-call detail is in the llm_calls table (or scripts/llm_cost_report.py)."""
+    from newsroom.llm_recorder import summarize_cost
+
+    s = summarize_cost(session_factory, days=days)
+    if not s["calls"]:
+        return f"Немає LLM-викликів за {days} дн. (таблиця llm_calls порожня)."
+    head = (f"Витрати на LLM за {days} дн.: ${s['cost']:.4f} · {s['calls']} викликів · "
+            f"{s['tokens']:,} токенів")
+    op_rows = [[o, n, f"${c:.4f}", f"{t:,}"] for o, n, c, t in s["by_op"]]
+    model_rows = [[m, n, f"${c:.4f}"] for m, n, c in s["by_model"]]
+    return _pre(head + "\n\nЗа типом запиту:\n"
+                + _table(["op", "викликів", "$", "токенів"], op_rows)
+                + "\n\nЗа моделлю:\n" + _table(["модель", "викликів", "$"], model_rows))
+
+
 def report_spine(session_factory, spine=None) -> str:
     """Semi-automatic spine evolution: topics that map to no rubric (candidates for a new
     rubric/alias) and spine rubrics that drew no events (candidates for merge/review). The
@@ -406,6 +423,7 @@ HELP = (
     "/topics [N] — гарячі теми з постів конкурентів\n"
     "/demand — індекс попиту за рубриками\n"
     "/spine — пропозиції до хребта рубрик (додати/злити) — рішення за тобою\n"
+    "/cost [N] — витрати на LLM за N днів (за типом запиту й моделлю)\n"
     "/sources — джерела-конкуренти й підписники\n"
     "/subs — підписки Telegram (авто-синк нових каналів)\n"
     "/top [N] — топ постів конкурентів за залученістю\n"
@@ -460,6 +478,8 @@ class AdminConsole:
             return report_demand(self.sf)
         if cmd == "spine":
             return report_spine(self.sf, self.spine)
+        if cmd == "cost":
+            return report_llm_cost(self.sf, days=_int(args, 7, lo=1, hi=90))
         if cmd == "sources":
             return report_sources(self.sf)
         if cmd == "subs":

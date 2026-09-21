@@ -37,7 +37,7 @@ from newsroom.models.publication import (
     SourceMetric,
     is_valid_publication_status,
 )
-from newsroom.models.service import Decision, ReputationEvent, SystemState
+from newsroom.models.service import Decision, LlmCall, ReputationEvent, SystemState
 
 __all__ = [
     # raw
@@ -50,5 +50,5 @@ __all__ = [
     "STATUS_DRAFT", "STATUS_PUBLISHED", "STATUS_PUBLISHING", "STATUS_REVIEW",
     "STATUS_SUPERSEDED", "STATUS_PUBLISH_AMBIGUOUS",
     # service
-    "ReputationEvent", "Decision", "SystemState",
+    "ReputationEvent", "Decision", "LlmCall", "SystemState",
 ]

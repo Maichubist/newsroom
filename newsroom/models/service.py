@@ -6,7 +6,9 @@ import datetime as dt
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    Float,
     ForeignKey,
+    Integer,
     String,
     Text,
     func,
@@ -44,6 +46,27 @@ class Decision(Base):
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LlmCall(Base):
+    """One row per LLM API call — cost telemetry for analysis. Every completion (via
+    llmutil.chat_json) and every embedding is recorded here with its token usage, the
+    computed USD cost, and (capped) the request/response text so the essence of each call
+    is auditable. Written best-effort: a logging failure never breaks the pipeline call."""
+    __tablename__ = "llm_calls"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    op: Mapped[str] = mapped_column(String(32), index=True)   # request type: classify|curate|factbase|generate|embed|…
+    model: Mapped[str] = mapped_column(String(64), index=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)       # input tokens
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)   # output tokens (0 for embeddings)
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)       # prompt-cache hits (discounted)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)          # computed from model pricing
+    event_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)  # correlate cost to an event
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_text: Mapped[str | None] = mapped_column(Text, nullable=True)   # input, capped (the essence)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # output, capped
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class SystemState(Base):
