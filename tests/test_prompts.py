@@ -38,7 +38,7 @@ PROMPTS = [
     (DEFAULT_VERDICT_PROMPT, {"claim": "ЗРАЗОК", "evidence": "E"}, '{"verdict"'),
     (DEFAULT_UPDATE_PROMPT, {"summary": "ЗРАЗОК", "event": "E"}, '{"update_type"'),
     (GEN_PROMPT, {"feedback": "", "material": "ЗРАЗОК"}, '{"headline"'),
-    (CLASSIFY_PROMPT, {"news_text": "ЗРАЗОК"}, None),   # classifier prompt has no JSON braces
+    (CLASSIFY_PROMPT, {"news_text": "ЗРАЗОК"}, '{"text"'),
 ]
 
 

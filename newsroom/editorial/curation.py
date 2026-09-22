@@ -258,7 +258,8 @@ def _load_event_freshness(session, event_ids, now) -> dict[int, float]:
 
 def curate_pending(session_factory, ranker: "EditorialRanker", *,
                    window_hours: int = 6, limit: int = 40, require_dedup_settled: bool = False,
-                   dedup_grace_seconds: float = 300.0) -> dict[str, int]:
+                   dedup_grace_seconds: float = 300.0,
+                   use_facets: bool = False) -> dict[str, int]:
     """One curation tick: mark recent, not-yet-curated events publish/hold. Selection is
     by popularity (charter v0.3): demand × heat feed the ranker, substance (the facts
     shown per candidate) keeps content-free events out. must-publish (refutation) events
@@ -297,7 +298,7 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *,
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))
         rows = s.execute(
             select(Event.id, Event.title, Event.rubric, Event.risk_level,
-                   Event.fact_base, Event.update_type)
+                   Event.fact_base, Event.compact_facts, Event.update_type)
             .where(*conditions, Event.id.not_in(have_pub))   # don't re-curate already-published events
             # newest first: at scale the freshest events reach the ranker before the window's tail.
             .order_by(Event.first_seen_at.desc(), Event.id).limit(limit)
@@ -308,30 +309,45 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *,
         demand_by_rubric = load_demand(s)                        # L1 rubric-demand fallback ({} until data)
         # per-event (heat, demand) from the L2 topic node — the two-top-levels popularity
         # signal, so a routine sub-topic stays cold under a hot broad rubric.
-        event_signals = load_event_signals(s, [r[0] for r in rows])
+        event_signals = load_event_signals(s, [r[0] for r in rows], prefer_facets=use_facets)
         freshness = _load_event_freshness(s, [r[0] for r in rows], now)   # content age by source publish date
 
     decisions: dict[int, str] = {}
     must_ids: set[int] = set()
     to_rank: list[Candidate] = []
-    for eid, title, rubric, risk, fact_base, update_type in rows:
+    # signals the ranker weighed, kept per event so each curate decision records WHY it went
+    # publish/hold (traceability — the ranker's own binary verdict alone is a black box).
+    signals: dict[int, dict] = {}
+    for eid, title, rubric, risk, fact_base, compact_facts, update_type in rows:
+        heat, node_demand = event_signals.get(eid, (0.0, 0.0))
+        # L2 node demand is primary; fall back to the L1 rubric-demand index when the
+        # topic has no engagement data yet (or the event is unplaced on the pyramid).
+        demand = node_demand or (demand_by_rubric.get(rubric) if rubric else None)
+        facts = _facts_brief(fact_base) or _facts_brief({"facts": compact_facts or []})
+        signals[eid] = {
+            "rubric": rubric, "risk": risk,
+            "demand": round(demand, 4) if demand is not None else None,
+            "heat": round(heat, 4) if heat else None,
+            "age_hours": round(freshness[eid], 2) if eid in freshness else None,
+            "facts": len(facts),
+            "popularity_model": "facets" if use_facets else "topic_path",
+        }
         # only a refutation skips the editor (a correction must go out); everything else,
         # breaking critical news included, is judged comparatively by the ranker
         if must_publish(update_type=update_type):
             decisions[eid] = CURATE_PUBLISH
             must_ids.add(eid)
         else:
-            heat, node_demand = event_signals.get(eid, (0.0, 0.0))
-            # L2 node demand is primary; fall back to the L1 rubric-demand index when the
-            # topic has no engagement data yet (or the event is unplaced on the pyramid).
-            demand = node_demand or (demand_by_rubric.get(rubric) if rubric else None)
             to_rank.append(Candidate(event_id=eid, title=title or "", rubric=rubric, risk_level=risk,
-                                     facts=_facts_brief(fact_base),
+                                     facts=facts,
                                      demand=demand, heat=heat or None, age_hours=freshness.get(eid)))
     must_count = len(decisions)
 
     if to_rank:
-        decisions.update(ranker.rank(to_rank))
+        from newsroom.llmutil import llm_context
+
+        with llm_context(stage="curate", event_ids=[c.event_id for c in to_rank]):
+            decisions.update(ranker.rank(to_rank))
 
     stats = {"curated": 0, "publish": 0, "hold": 0, "must": must_count}
     with session_factory() as s:
@@ -340,10 +356,18 @@ def curate_pending(session_factory, ranker: "EditorialRanker", *,
             if event is None or event.curated is not None:
                 continue
             event.curated = decision
+            sig = signals.get(eid, {})
+            dem, hot = sig.get("demand"), sig.get("heat")
+            # the popularity score the selection turns on (demand × heat); one factor when only
+            # one is known, None for a deterministic must-publish.
+            score = (round(dem * hot, 4) if (dem is not None and hot is not None)
+                     else (dem if dem is not None else hot))
             s.add(Decision(
                 entity_type="event", entity_id=str(eid), stage="edit",
-                decision=f"curate_{decision}", reason=None,
-                details={"must": eid in must_ids},
+                decision=f"curate_{decision}",
+                reason=("must-publish: спростування" if eid in must_ids else None),
+                details={"must": eid in must_ids, **sig},
+                score=score,
                 model=getattr(ranker, "model", None),
             ))
             stats["curated"] += 1

@@ -70,6 +70,10 @@ class Event(Base):
     is_rumor: Mapped[bool | None] = mapped_column(Boolean, nullable=True)         # leak-channel rumor (charter 3.7)
     classifier_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)           # 5-10 topic keywords (data-driven hot-topics layer)
+    # Small evidence-preserving fact list emitted by the already-paid classifier.
+    # It is enough for single-source drafting/curation; multi-source events may later
+    # receive the richer merged fact_base with divergence and corroboration.
+    compact_facts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # learned taxonomy pyramid (charter v0.3 §3.1): the broad->specific topic path and
     # the id of its leaf node in taxonomy_nodes (for engagement roll-up up the tree).
     topic_path: Mapped[list | None] = mapped_column(JSONB, nullable=True)
@@ -115,6 +119,75 @@ class TaxonomyNode(Base):
     # the node's depth level to [0,1]; recomputed with heat. Curation reads it at L2.
     demand: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FacetDimension(Base):
+    """Stable facet namespace (event_type, geography, actor, impact...).
+
+    Dimensions are deliberately fixed by code/editorial policy.  The values below a
+    dimension may be learned from incoming news, but a model cannot invent a new axis and
+    silently change the meaning of the analytics.
+    """
+    __tablename__ = "facet_dimensions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    key: Mapped[str] = mapped_column(String(48), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(120))
+    controlled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FacetValue(Base):
+    """Canonical value inside one dimension, optionally nested inside another value."""
+    __tablename__ = "facet_values"
+    __table_args__ = (UniqueConstraint("dimension_id", "slug", name="uq_facet_dimension_slug"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    dimension_id: Mapped[int] = mapped_column(ForeignKey("facet_dimensions.id"), index=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("facet_values.id"), nullable=True, index=True)
+    slug: Mapped[str] = mapped_column(String(160))
+    label: Mapped[str] = mapped_column(String(200))
+    # provisional values are data-driven candidates; active values have enough support.
+    status: Mapped[str] = mapped_column(String(16), default="provisional", server_default="provisional")
+    aliases: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    event_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    heat: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    demand: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    metric_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventFacet(Base):
+    """Evidence-backed assignment of one facet value to an event."""
+    __tablename__ = "event_facets"
+    __table_args__ = (UniqueConstraint("event_id", "facet_value_id", name="uq_event_facet"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
+    facet_value_id: Mapped[int] = mapped_column(ForeignKey("facet_values.id"), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, server_default="1")
+    evidence_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id"), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), default="leaf", server_default="leaf")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FacetPairMetric(Base):
+    """Time-windowed co-occurrence signal; not a semantic/ontological edge."""
+    __tablename__ = "facet_pair_metrics"
+    __table_args__ = (
+        UniqueConstraint("facet_a_id", "facet_b_id", "window_hours", name="uq_facet_pair_window"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    facet_a_id: Mapped[int] = mapped_column(ForeignKey("facet_values.id"), index=True)
+    facet_b_id: Mapped[int] = mapped_column(ForeignKey("facet_values.id"), index=True)
+    window_hours: Mapped[int] = mapped_column(Integer, default=24, server_default="24")
+    event_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    independent_source_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    heat: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    demand: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    measured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class EventItem(Base):

@@ -49,7 +49,9 @@ def test_extract_media_photo_and_video():
     assert video[0].kind == "video" and video[0].size_bytes == 2048
     doc_video = extract_media(_msg(id=3, document=SimpleNamespace(mime_type="video/mp4", size=99)))
     assert doc_video[0].kind == "video"
-    assert extract_media(_msg(id=4)) == []
+    doc_image = extract_media(_msg(id=4, document=SimpleNamespace(mime_type="image/jpeg", size=77)))
+    assert doc_image[0].kind == "image" and doc_image[0].size_bytes == 77
+    assert extract_media(_msg(id=5)) == []
 
 
 def test_album_merged_into_single_item():

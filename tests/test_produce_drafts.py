@@ -156,6 +156,19 @@ def test_require_curation_drafts_only_publish_marked(pg_engine):
         assert drafted == {pub_id}        # only the publish-marked event is drafted
 
 
+def test_require_factbase_waits_for_full_base(pg_engine):
+    sf = make_session_factory(pg_engine)
+    eid = _event(pg_engine, status="confirmed", title="Чекає фактбазу")
+    pipe = EditorialPipeline(sf, generator=FakeGenerator(), stoplist_rules=STOP,
+                             ai_accent_patterns=ACCENT)
+
+    assert produce_drafts(sf, pipe, require_factbase=True)["produced"] == 0
+    with Session(pg_engine) as s:
+        s.get(Event, eid).fact_base = {"facts": [{"text": "Перевірений факт"}]}
+        s.commit()
+    assert produce_drafts(sf, pipe, require_factbase=True)["produced"] == 1
+
+
 def test_produce_drafts_skips_summary_only_update_types(pg_engine):
     sf = make_session_factory(pg_engine)
     e_new = _event(pg_engine, status="confirmed", title="Новий факт", update_type="new_fact")

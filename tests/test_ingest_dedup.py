@@ -12,11 +12,14 @@ from newsroom.analyze.ingest_dedup import (
     MERGE_SEPARATE,
     IngestDedup,
     MergeConfig,
+    choose_canonical,
     dedup_new_events,
+    event_tier_rank,
     find_merge_candidates,
     load_merge_config,
     merge_events,
 )
+from newsroom.db import make_session_factory
 from newsroom.publishers.predup import TwinJudgment
 
 UTC = dt.timezone.utc
@@ -70,14 +73,16 @@ class FakeJudge:
 _tag = {"n": 0}
 
 
-def _event_with_item(session, *, title, content_hash, simhash=None, first_seen=None, status="confirmed"):
+def _event_with_item(session, *, title, content_hash, simhash=None, first_seen=None, status="confirmed",
+                     tier="media", is_official=False):
     from newsroom.models import Event, EventItem, Item, Source
 
     _tag["n"] += 1
     t = _tag["n"]
     src = session.execute(select(Source).where(Source.handle_or_url == f"https://s/{t}")).scalar_one_or_none()
     if src is None:
-        src = Source(kind="rss", handle_or_url=f"https://s/{t}", name="S", origin="ua", tier="media")
+        src = Source(kind="rss", handle_or_url=f"https://s/{t}", name="S", origin="ua",
+                     tier=tier, is_official=is_official)
         session.add(src)
         session.flush()
     it = Item(source_id=src.id, external_id=f"e{t}", content_hash=content_hash, simhash=simhash, title=title)
@@ -245,6 +250,78 @@ def test_dedup_new_events_enforce_merges(pg_engine):
         assert "ingest_duplicate" in stages and "ingest_separate" in stages
 
     assert dedup_new_events(sf, IngestDedup(sf, judge=None), enforce=True)["checked"] == 0  # idempotent
+
+
+# --- official-first canonical (docs: official-first sourcing) ------------------
+
+def test_choose_canonical_prefers_official_else_earlier():
+    # candidate is ALWAYS earlier than incoming (find_merge_candidates invariant).
+    earlier, later = 10, 20
+    # incoming (later) strictly more official → it becomes canonical (flip)
+    assert choose_canonical(later, 0, earlier, 2) == (later, earlier)
+    # equal officialness → earlier wins (no flip)
+    assert choose_canonical(later, 1, earlier, 1) == (earlier, later)
+    # earlier more official → earlier stays canonical (no flip)
+    assert choose_canonical(later, 2, earlier, 0) == (earlier, later)
+
+
+@pytest.mark.pg
+def test_event_tier_rank_uses_best_source(pg_engine):
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        off, _ = _event_with_item(s, title="Офіційне", content_hash="A".ljust(64, "0"),
+                                  tier="official", is_official=True)
+        agg, _ = _event_with_item(s, title="Агрегатор", content_hash="B".ljust(64, "0"),
+                                  tier="aggregator")
+        med, _ = _event_with_item(s, title="Медіа", content_hash="C".ljust(64, "0"), tier="media")
+        s.commit()
+    with Session(pg_engine) as s:
+        assert event_tier_rank(s, off) == 0     # official / is_official
+        assert event_tier_rank(s, med) == 1
+        assert event_tier_rank(s, agg) == 2
+
+
+@pytest.mark.pg
+def test_canonical_by_tier_keeps_later_official_as_canonical(pg_engine):
+    # aggregator breaks first, official confirms LATER, same content_hash (auto-duplicate).
+    # With the flag, the official event is canonical and the earlier aggregator folds INTO it.
+    from newsroom.models import Event
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        agg, _ = _event_with_item(s, title="Обстріл", content_hash="H".ljust(64, "0"),
+                                  tier="aggregator")
+        off, off_item = _event_with_item(s, title="Обстріл (офіційно)", content_hash="H".ljust(64, "0"),
+                                         tier="official", is_official=True)
+        s.commit()
+
+    stats = dedup_new_events(sf, IngestDedup(sf, judge=None), enforce=True, canonical_by_tier=True)
+    assert stats["merged"] == 1
+    with Session(pg_engine) as s:
+        assert s.get(Event, agg).duplicate_of == off      # earlier aggregator folded into later official
+        assert s.get(Event, off).duplicate_of is None     # official stays canonical
+
+
+@pytest.mark.pg
+def test_canonical_by_tier_off_keeps_earlier(pg_engine):
+    # default (flag off): the earlier event stays canonical even if the later is more official.
+    from newsroom.models import Decision, Event
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        agg, _ = _event_with_item(s, title="Обстріл", content_hash="H".ljust(64, "0"),
+                                  tier="aggregator")
+        off, _ = _event_with_item(s, title="Обстріл (офіційно)", content_hash="H".ljust(64, "0"),
+                                  tier="official", is_official=True)
+        s.commit()
+
+    dedup_new_events(sf, IngestDedup(sf, judge=None), enforce=True)  # canonical_by_tier defaults False
+    with Session(pg_engine) as s:
+        assert s.get(Event, off).duplicate_of == agg      # earlier aggregator kept canonical
+        # observe fields still recorded so we could measure the flip before enabling it
+        d = s.execute(select(Decision).where(Decision.stage == "ingest_dedup",
+                                             Decision.decision == "ingest_duplicate")).scalars().first()
+        assert d.details["keep_by_tier"] == off and d.details["tier_flip"] is True
 
 
 @pytest.mark.pg

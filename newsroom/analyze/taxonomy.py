@@ -13,6 +13,7 @@ tested; ingest is pg-tested.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import math
 import re
@@ -235,7 +236,7 @@ def node_path_labels(nodes_by_id: dict, node_id: int) -> list[str]:
     return list(reversed(chain))
 
 
-def load_event_signals(session, event_ids) -> dict[int, tuple[float, float]]:
+def load_event_signals(session, event_ids, *, prefer_facets: bool = False) -> dict[int, tuple[float, float]]:
     """Per-event (heat, demand) from the event's L2 (depth-1) topic node — the two-top-
     levels sweet spot for popularity (L1 too coarse: all war; L3+ too sparse/noisy). Falls
     back to the L1 (depth-0) node, else (0.0, 0.0). Keying off the SPECIFIC level is what
@@ -275,6 +276,13 @@ def load_event_signals(session, event_ids) -> dict[int, tuple[float, float]]:
             guard += 1
         sig = l2 if l2 is not None else (l1 if l1 is not None else (0.0, 0.0))
         out[eid] = (round(sig[0], 4), round(sig[1], 4))
+    if prefer_facets:
+        from newsroom.analyze.facets import load_event_facet_signals
+
+        # Facets are additive and may only exist for newly classified events.  Override
+        # legacy path signals where available; retain the old pyramid as a rollout/backfill
+        # fallback rather than turning missing facet data into zeros.
+        out.update(load_event_facet_signals(session, event_ids))
     return out
 
 
@@ -313,6 +321,14 @@ DEFAULT_MERGE_PROMPT = """Нижче — дочірні теми ОДНОГО б
 
 def _render_nodes(nodes: list[tuple[int, str]]) -> str:
     return "\n".join(f"[{nid}] {(label or '').strip()}" for nid, label in nodes)
+
+
+def taxonomy_children_hash(nodes: list[tuple[int, str]]) -> str:
+    """Stable identity of a sibling set. Counts/heat do not affect synonymy."""
+    payload = "\n".join(
+        f"{nid}:{normalize_label(label)}" for nid, label in sorted(nodes, key=lambda row: row[0])
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class LLMSynonymGrouper:  # pragma: no cover - network
@@ -408,12 +424,25 @@ def merge_synonym_nodes(session_factory, grouper: "SynonymGrouper", *, limit_par
 
     merged = 0
     groups_found = 0
-    for children in list(by_parent.values())[:limit_parents]:
+    cached = 0
+    for parent_id, children in list(by_parent.items())[:limit_parents]:
         if len(children) < 2:
             continue
-        groups = grouper.group([(nid, label) for nid, label, _ in children])
-        if not groups:
-            continue
+        from newsroom.models import SystemState
+
+        cache_key = f"taxonomy_merge:{parent_id if parent_id is not None else 'root'}"
+        input_hash = taxonomy_children_hash([(nid, label) for nid, label, _ in children])
+        with session_factory() as s:
+            state = s.get(SystemState, cache_key)
+            if state is not None and (state.value or {}).get("children_hash") == input_hash:
+                cached += 1
+                continue
+
+        from newsroom.llmutil import llm_context
+
+        with llm_context(stage="taxonomy_merge", taxonomy_parent_id=parent_id,
+                         children_hash=input_hash):
+            groups = grouper.group([(nid, label) for nid, label, _ in children])
         ec_map = {nid: ec for nid, _, ec in children}
         with session_factory() as s:
             for group in groups:
@@ -423,5 +452,17 @@ def merge_synonym_nodes(session_factory, grouper: "SynonymGrouper", *, limit_par
                         merge_node(s, nid, canonical)
                         merged += 1
                 groups_found += 1
+            s.flush()
+            remaining = list(s.execute(
+                select(TaxonomyNode.id, TaxonomyNode.label)
+                .where(TaxonomyNode.parent_id == parent_id)
+            ).all())
+            final_hash = taxonomy_children_hash(remaining)
+            state = s.get(SystemState, cache_key)
+            value = {"children_hash": final_hash, "child_count": len(remaining)}
+            if state is None:
+                s.add(SystemState(key=cache_key, value=value))
+            else:
+                state.value = value
             s.commit()
-    return {"merged": merged, "groups": groups_found}
+    return {"merged": merged, "groups": groups_found, "cached": cached}

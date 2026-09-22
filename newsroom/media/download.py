@@ -1,7 +1,8 @@
-"""Media download pipeline (architecture §12, §13).
+"""Approved-publication media download pipeline (architecture §12, §13).
 
-Media is downloaded only after an item passes the filter (accepted/clustered) —
-never for noise. For each such media asset without a stored copy: fetch the bytes,
+Media is downloaded only after an item belongs to a Telegram publication whose
+editorial critic approved it — never for noise or unpublished candidates. For each
+such media asset without a stored copy: fetch the bytes,
 store them behind the MediaStore abstraction, record size, and for images compute
 a pHash for the reuse check (§9.4). Fetch, decode and store are all injectable, so
 the pipeline is offline-tested end to end. Idempotent: an asset with a storage_key
@@ -10,6 +11,7 @@ is skipped.
 from __future__ import annotations
 
 import logging
+import datetime as dt
 from dataclasses import dataclass
 from typing import Callable
 
@@ -19,7 +21,8 @@ from newsroom.media.store import MediaStore, media_key
 log = logging.getLogger("newsroom.media.download")
 
 DEFAULT_MAX_BYTES = 25 * 1024 * 1024
-_DOWNLOADABLE_ITEM_STATUSES = ("accepted", "clustered")
+MAX_DOWNLOAD_ATTEMPTS = 3
+RETRY_BASE_SECONDS = 30
 
 
 # A real browser UA — a bot-ish UA gets 403'd by many CDNs/sites (empty UA got 403s too).
@@ -52,6 +55,11 @@ def persist_media_bytes(session_factory, store, decoder, *, media_id: int, item_
         if asset is not None:
             asset.storage_key = key
             asset.size_bytes = len(data)
+            hash_failed = kind == "image" and decoder is not None and phash is None
+            asset.download_status = "failed" if hash_failed else "ready"
+            asset.download_error = "phash_failed" if hash_failed else None
+            asset.next_retry_at = None
+            asset.downloaded_at = dt.datetime.now(dt.timezone.utc)
             if phash is not None:
                 asset.phash = phash
             s.commit()
@@ -65,6 +73,25 @@ class DownloadResult:
     hashed: bool = False
     skipped: bool = False
     error: str | None = None
+
+
+def record_download_failure(session_factory, media_id: int, error: str, *, terminal: bool = False) -> None:
+    """Persist bounded retry/terminal state shared by HTTP and Telegram workers."""
+    from newsroom.models import MediaAsset
+
+    with session_factory() as s:
+        asset = s.get(MediaAsset, media_id)
+        if asset is None:
+            return
+        attempts = int(asset.download_attempts or 0)
+        exhausted = terminal or attempts >= MAX_DOWNLOAD_ATTEMPTS
+        asset.download_status = "too_large" if terminal else ("failed" if exhausted else "retry")
+        asset.download_error = (error or "download_failed")[:2000]
+        asset.next_retry_at = None if exhausted else (
+            dt.datetime.now(dt.timezone.utc)
+            + dt.timedelta(seconds=RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1)))
+        )
+        s.commit()
 
 
 class MediaDownloader:
@@ -81,37 +108,54 @@ class MediaDownloader:
 
         with self.sf() as s:
             asset = s.get(MediaAsset, media_id)
-            if asset is None or asset.storage_key or not asset.url:
+            if asset is None or asset.storage_key or not asset.url or asset.download_status in {"failed", "too_large"}:
                 return DownloadResult(media_id, skipped=True)
+            now = dt.datetime.now(dt.timezone.utc)
+            if asset.next_retry_at is not None and asset.next_retry_at > now:
+                return DownloadResult(media_id, skipped=True)
+            asset.download_attempts = int(asset.download_attempts or 0) + 1
+            asset.download_status = "downloading"
+            asset.download_error = None
             url, kind, item_id = asset.url, asset.kind, asset.item_id
+            s.commit()
 
         try:
             data = self.fetch(url)
         except Exception as exc:  # noqa: BLE001
             log.warning("media fetch failed", extra={"media_id": media_id, "error": str(exc)})
+            record_download_failure(self.sf, media_id, str(exc))
             return DownloadResult(media_id, error=str(exc))
         if not data or len(data) > self.max_bytes:
+            record_download_failure(self.sf, media_id, "too_large_or_empty", terminal=True)
             return DownloadResult(media_id, skipped=True, error="too_large_or_empty")
 
-        _key, hashed = persist_media_bytes(
-            self.sf, self.store, self.decoder,
-            media_id=media_id, item_id=item_id, key_source=url, kind=kind, data=data)
+        try:
+            _key, hashed = persist_media_bytes(
+                self.sf, self.store, self.decoder,
+                media_id=media_id, item_id=item_id, key_source=url, kind=kind, data=data)
+        except Exception as exc:  # noqa: BLE001 - one bad file/store write must not abort the batch
+            log.warning("media persist failed", extra={"media_id": media_id, "error": str(exc)})
+            record_download_failure(self.sf, media_id, str(exc))
+            return DownloadResult(media_id, error=str(exc))
         return DownloadResult(media_id, stored=True, hashed=hashed)
 
     def download_pending(self, *, limit: int = 50) -> dict[str, int]:
-        """Download media for filter-passed items that has not been stored yet."""
-        from sqlalchemy import select
+        """Download media only for editorially-approved draft publications."""
+        from sqlalchemy import or_, select
 
-        from newsroom.models import Item, MediaAsset
+        from newsroom.media.state import approved_item_ids_query
+        from newsroom.models import MediaAsset
 
+        now = dt.datetime.now(dt.timezone.utc)
         with self.sf() as s:
             ids = list(s.execute(
                 select(MediaAsset.id)
-                .join(Item, Item.id == MediaAsset.item_id)
                 .where(
-                    Item.status.in_(_DOWNLOADABLE_ITEM_STATUSES),
+                    MediaAsset.item_id.in_(approved_item_ids_query()),
                     MediaAsset.storage_key.is_(None),
                     MediaAsset.url.is_not(None),
+                    MediaAsset.download_status.not_in(("failed", "too_large")),
+                    or_(MediaAsset.next_retry_at.is_(None), MediaAsset.next_retry_at <= now),
                 )
                 .order_by(MediaAsset.id)
                 .limit(limit)

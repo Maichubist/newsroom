@@ -68,7 +68,10 @@ class FactChecker:
         item_texts = [f"{r[1] or ''}\n{r[2] or ''}".strip() for r in rows]
 
         # 2. extract atomic claims
-        claims = self.extractor.extract(title, _combined_text(title, item_texts))[: self.max_claims]
+        from newsroom.llmutil import llm_context
+
+        with llm_context(event_id=event_id, stage="factcheck_claims"):
+            claims = self.extractor.extract(title, _combined_text(title, item_texts))[: self.max_claims]
         if not claims:
             return FactCheckResult(event_id, extracted=0, checked=0)
 
@@ -85,7 +88,9 @@ class FactChecker:
                 texts = self._evidence_item_texts(s, refs)
                 s.commit()
             snippets = [_evidence_snippet(ref, texts.get(ref.item_id)) for ref in refs]
-            result = self.judge.judge(claim.text, snippets)
+            with llm_context(event_id=event_id, claim_id=claim_id,
+                             stage="factcheck_verdict"):
+                result = self.judge.judge(claim.text, snippets)
             with self.sf() as s:
                 apply_verdict(s, claim_id, ev_ids, result)
                 s.commit()

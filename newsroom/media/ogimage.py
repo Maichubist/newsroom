@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 log = logging.getLogger("newsroom.media.ogimage")
+MAX_OG_ATTEMPTS = 3
 
 # A real browser UA: many sites (Cloudflare, Суспільне, …) 403 a bot-ish UA, which was
 # failing the og:image page fetch ~600 times (no real picture reached the post).
@@ -92,8 +93,29 @@ class OgImageResolver:
         try:
             html = self.fetch(url)
         except Exception as exc:  # noqa: BLE001 - a dead page must not stall the queue
-            # transient failure: don't mark, so a later tick can retry the page
             log.warning("og fetch failed", extra={"item_id": item_id, "error": str(exc)})
+            # Retry a bounded number of times. On exhaustion close discovery as
+            # og_none so one permanently forbidden/dead page cannot hold a fully
+            # approved news item forever.
+            from sqlalchemy import func, select
+
+            with self.sf() as s:
+                prior = int(s.scalar(
+                    select(func.count()).select_from(Decision).where(
+                        Decision.entity_type == "item",
+                        Decision.entity_id == str(item_id),
+                        Decision.stage == "media",
+                        Decision.decision == "og_error",
+                    )
+                ) or 0)
+                exhausted = prior + 1 >= MAX_OG_ATTEMPTS
+                s.add(Decision(
+                    entity_type="item", entity_id=str(item_id), stage="media",
+                    decision="og_none" if exhausted else "og_error",
+                    reason=("og discovery exhausted" if exhausted else "og discovery retry"),
+                    details={"attempt": prior + 1, "error": str(exc)[:1000]},
+                ))
+                s.commit()
             return OgResult(item_id, skipped=True)
 
         image_url = extract_og_image(html)
@@ -109,11 +131,12 @@ class OgImageResolver:
 
 
 def resolve_pending(session_factory, resolver: "OgImageResolver", *, limit: int = 25) -> dict[str, int]:
-    """One og:image tick: for post-filter items with a URL and no media yet, resolve
+    """One og:image tick: for approved-draft items with a URL and no media yet, resolve
     the article's og:image into an image asset. Idempotent — an item that already has
     media, or was already checked (og_image / og_none), is not fetched again."""
     from sqlalchemy import String, cast, select
 
+    from newsroom.media.state import approved_item_ids_query
     from newsroom.models import Decision, Item, MediaAsset
 
     with session_factory() as s:
@@ -125,7 +148,7 @@ def resolve_pending(session_factory, resolver: "OgImageResolver", *, limit: int 
         ids = list(s.execute(
             select(Item.id)
             .where(
-                Item.status.in_(("accepted", "clustered")),
+                Item.id.in_(approved_item_ids_query()),
                 Item.url.is_not(None),
                 Item.id.not_in(have_media),
                 cast(Item.id, String).not_in(checked),

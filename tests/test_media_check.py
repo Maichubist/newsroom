@@ -62,7 +62,8 @@ def _item_with_media(session, source_id, ext, phash, first_seen):
     it = Item(source_id=source_id, external_id=ext, content_hash=ext, title=ext)
     session.add(it)
     session.flush()
-    ma = MediaAsset(item_id=it.id, kind="image", phash=phash, first_seen_at=first_seen)
+    ma = MediaAsset(item_id=it.id, kind="image", phash=phash, first_seen_at=first_seen,
+                    storage_key=f"ready/{ext}", download_status="ready")
     session.add(ma)
     session.flush()
     return it.id
@@ -95,7 +96,8 @@ def test_media_checker_flags_recycled_image(pg_engine):
     assert result.checked == 1 and result.reused == 1 and not result.skipped
 
     with Session(pg_engine) as s:
-        dec = s.execute(select(Decision).where(Decision.entity_id == str(event_id),
+        dec = s.execute(select(Decision).where(Decision.entity_type == "event",
+                                               Decision.entity_id == str(event_id),
                                                Decision.stage == "verify")).scalars().one()
         assert dec.decision == "media_reuse" and dec.details["checked"] == 1
 
@@ -104,7 +106,8 @@ def test_media_checker_flags_recycled_image(pg_engine):
     with Session(pg_engine) as s:
         from sqlalchemy import func
         assert s.scalar(select(func.count()).select_from(Decision)
-                        .where(Decision.entity_id == str(event_id), Decision.stage == "verify")) == 1
+                        .where(Decision.entity_type == "event",
+                               Decision.entity_id == str(event_id), Decision.stage == "verify")) == 1
 
 
 @pytest.mark.pg
@@ -129,8 +132,52 @@ def test_media_checker_clean_when_no_reuse(pg_engine):
     result = MediaChecker(sf).check_event(event_id)
     assert result.checked == 1 and result.reused == 0
     with Session(pg_engine) as s:
-        dec = s.execute(select(Decision).where(Decision.entity_id == str(event_id))).scalars().one()
+        dec = s.execute(select(Decision).where(Decision.entity_type == "event",
+                                               Decision.entity_id == str(event_id))).scalars().one()
         assert dec.decision == "media_clean"
+
+
+@pytest.mark.pg
+def test_media_checker_keeps_clean_asset_in_mixed_album(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Source
+
+    sf = make_session_factory(pg_engine)
+    old = dt.datetime(2026, 1, 1, tzinfo=UTC)
+    now = dt.datetime(2026, 9, 1, tzinfo=UTC)
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://mixed", name="mixed", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        _item_with_media(s, src.id, "archive", "0000000000000000", old)
+        it = Item(source_id=src.id, external_id="current", content_hash="current", title="t")
+        s.add(it)
+        s.flush()
+        reused = MediaAsset(item_id=it.id, kind="image", phash="0000000000000001",
+                            first_seen_at=now, storage_key="ready/reused", download_status="ready")
+        clean = MediaAsset(item_id=it.id, kind="image", phash="ffffffffffffffff",
+                           first_seen_at=now, storage_key="ready/clean", download_status="ready")
+        s.add_all([reused, clean])
+        ev = Event(status="confirmed", title="mixed", first_seen_at=now)
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id))
+        s.flush()
+        event_id, reused_id, clean_id = ev.id, reused.id, clean.id
+        s.commit()
+
+    result = MediaChecker(sf).check_event(event_id)
+    assert result.reused == 1
+    with Session(pg_engine) as s:
+        event_decision = s.execute(select(Decision).where(
+            Decision.entity_type == "event", Decision.entity_id == str(event_id),
+        )).scalars().one()
+        asset_decisions = dict(s.execute(select(Decision.entity_id, Decision.decision).where(
+            Decision.entity_type == "media_asset",
+            Decision.entity_id.in_((str(reused_id), str(clean_id))),
+        )).all())
+        assert event_decision.decision == "media_clean"
+        assert asset_decisions == {str(reused_id): "media_reuse", str(clean_id): "media_clean"}
 
 
 @pytest.mark.pg
@@ -139,7 +186,7 @@ def test_media_check_admits_video_only_event(pg_engine):
     # verdict, otherwise the publisher would never attach the Telegram video.
     from newsroom.factcheck.media import check_media_pending
     from newsroom.db import make_session_factory
-    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Source
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
 
     sf = make_session_factory(pg_engine)
     now = dt.datetime(2026, 9, 1, tzinfo=UTC)
@@ -151,16 +198,23 @@ def test_media_check_admits_video_only_event(pg_engine):
         s.add(it)
         s.flush()
         s.add(MediaAsset(item_id=it.id, kind="video", phash=None,
-                         storage_key="ab/vid", first_seen_at=now))   # downloaded video, no phash
+                         storage_key="ab/vid", download_status="ready",
+                         first_seen_at=now))   # downloaded video, no phash
         ev = Event(status="confirmed", title="Відео-подія", first_seen_at=now)
         s.add(ev)
         s.flush()
         s.add(EventItem(event_id=ev.id, item_id=it.id))
+        s.add(Publication(
+            event_id=ev.id, channel="telegram", kind="post", status="draft",
+            headline="h", body="b", features={"critic_ok": True},
+            media_approved_at=dt.datetime.now(UTC),
+        ))
         s.commit()
         event_id = ev.id
 
     stats = check_media_pending(sf, MediaChecker(sf))
     assert stats["events"] == 1                          # video-only event was selected
     with Session(pg_engine) as s:
-        dec = s.execute(select(Decision).where(Decision.entity_id == str(event_id))).scalars().one()
+        dec = s.execute(select(Decision).where(Decision.entity_type == "event",
+                                               Decision.entity_id == str(event_id))).scalars().one()
         assert dec.decision == "media_clean" and dec.details["checked"] == 0   # no phash to check

@@ -68,7 +68,8 @@ def _render_send_body(pub) -> str:
 class Publisher:
     def __init__(self, session_factory, *, telegram, stoplist_rules, limits: Limits,
                  supervisor=None, media_store=None, purge_media_after_publish: bool = False,
-                 require_vision: bool = True, charter_version: str = "0.3",
+                 require_vision: bool = True, require_media_check: bool = True,
+                 charter_version: str = "0.3",
                  predup=None, predup_enforce: bool = False, spine=None,
                  enrich_on_duplicate: bool = False):
         self.sf = session_factory
@@ -93,6 +94,7 @@ class Publisher:
         # require a vision (media stop-list) verdict before attaching media. False when
         # vision moderation is off — media then attaches on the reuse check alone.
         self.require_vision = bool(require_vision)
+        self.require_media_check = bool(require_media_check)
         self.charter_version = charter_version
 
     # ------------------------------------------------------------------
@@ -152,8 +154,9 @@ class Publisher:
             event = s.get(Event, pub.event_id) if pub.event_id else None
             inputs = self._gather_inputs(s, pub, event)
             body = _render_send_body(pub)
-            media_items = self._eligible_media_items(s, pub.event_id)
             reply_to_pub_id, reply_to_message_id = self._story_reply_target(s, event)
+            media_was_approved = pub.media_approved_at is not None
+            predup_override = bool((pub.features or {}).get("predup_override"))
 
         decision = evaluate_gate(inputs, self.limits)
         if not decision.allow:
@@ -165,18 +168,32 @@ class Publisher:
         # review draft carries a one-shot override so it is not re-arbitrated. A failure
         # here must NOT stall publishing (the twin check is a backstop, not a hard floor —
         # OPSEC/critic/stop live in the gate): log and publish rather than freeze the queue.
-        if self.predup is not None and not (pub.features or {}).get("predup_override"):
-            try:
-                verdict = self.predup.check(pub.event_id)
-                blocked = self._apply_predup(publication_id, verdict)
-                if blocked is not None:
-                    return blocked
-            except Exception as exc:  # noqa: BLE001
-                # publish rather than freeze the queue, but make the bypass VISIBLE — a
-                # silent enforce bypass would defeat the whole check.
-                log.exception("predup check failed; publishing without it",
-                              extra={"publication_id_": publication_id})
-                self._record_predup_error(publication_id, exc)
+        # Initial twin check authorizes spending network/storage work on media. While
+        # media is pending we do not repeat the LLM call every publish tick.
+        if not media_was_approved:
+            blocked = self._run_predup(publication_id, pub.event_id, predup_override)
+            if blocked is not None:
+                return blocked
+
+        # The final text gate and publish-time dedup have approved this news. Persist
+        # that authorization, then hold delivery until media discovery/download/check
+        # settles. No media worker is allowed to fetch before media_approved_at exists.
+        media_wait = self._prepare_media(publication_id)
+        if media_wait is not None:
+            return PublishOutcome(publication_id, reasons=[media_wait], skipped=True)
+
+        # Media may have taken several ticks. Recheck twins once at the actual send
+        # boundary, but only when this is a later pass (maximum two calls total).
+        if media_was_approved:
+            blocked = self._run_predup(publication_id, pub.event_id, predup_override)
+            if blocked is not None:
+                return blocked
+
+        with self.sf() as s:
+            pub = s.get(Publication, publication_id)
+            if pub is None or pub.status != "draft":
+                return PublishOutcome(publication_id, skipped=True)
+            media_items = self._eligible_media_items(s, pub.event_id)
 
         # Outbox claim (delivery state): atomically move draft -> publishing BEFORE sending,
         # so a crash between the send and the "published" write is recoverable instead of
@@ -213,7 +230,8 @@ class Publisher:
                                         risk_level=(ev.risk_level if ev else None),
                                         rubric=(ev.rubric if ev else None),
                                         is_rumor=pub_is_rumor, message_id=result.message_id)
-                self._purge_media(pub.event_id)
+                if result.media_sent:
+                    self._purge_media(pub.event_id)
                 return PublishOutcome(publication_id, published=True, message_id=result.message_id)
             # definite send failure -> release the claim back to draft so it retries next tick
             from newsroom.models import STATUS_DRAFT
@@ -244,6 +262,21 @@ class Publisher:
             pub.status = STATUS_PUBLISHING
             s.commit()
         return True
+
+    def _run_predup(self, publication_id: int, event_id: int | None,
+                    override: bool) -> PublishOutcome | None:
+        if self.predup is None or override or event_id is None:
+            return None
+        try:
+            verdict = self.predup.check(event_id)
+            return self._apply_predup(publication_id, verdict)
+        except Exception as exc:  # noqa: BLE001
+            # This check is a backstop, not the hard OPSEC floor: fail open, but
+            # journal the bypass so it is never silent.
+            log.exception("predup check failed; publishing without it",
+                          extra={"publication_id_": publication_id})
+            self._record_predup_error(publication_id, exc)
+            return None
 
     def reconcile_pending_deliveries(self) -> int:
         """Recover posts stuck in 'publishing' (a crash between send and the published write):
@@ -308,7 +341,10 @@ class Publisher:
                                        "media_vision_ok", "media_vision_block")),
             )
         ).scalars().all())
-        reuse_ok = "media_clean" in decisions and "media_reuse" not in decisions
+        if self.require_media_check:
+            reuse_ok = "media_clean" in decisions and "media_reuse" not in decisions
+        else:
+            reuse_ok = "media_reuse" not in decisions  # still honour an existing block
         vision_blocked = "media_vision_block" in decisions
         if self.require_vision:
             vision_ok = "media_vision_ok" in decisions and not vision_blocked
@@ -318,17 +354,108 @@ class Publisher:
             return []
 
         rows = s.execute(
-            select(MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes,
-                   MediaAsset.storage_key)
+            select(MediaAsset.id, MediaAsset.kind, MediaAsset.url, MediaAsset.width, MediaAsset.size_bytes,
+                    MediaAsset.storage_key)
             .join(Item, Item.id == MediaAsset.item_id)
             .join(EventItem, EventItem.item_id == Item.id)
             .where(EventItem.event_id == event_id,
+                   # storage_key predates lifecycle tracking in existing databases;
+                   # init_db backfills it, and this compatibility clause also keeps
+                   # an explicitly pre-seeded file sendable before that first boot.
+                   or_(MediaAsset.download_status == "ready",
+                       and_(MediaAsset.storage_key.is_not(None),
+                            MediaAsset.download_status == "pending")),
                    or_(MediaAsset.url.is_not(None),
                        and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))))
             .order_by(MediaAsset.id)
         ).all()
-        return [MediaItem(kind=k, url=u, width=w, size_bytes=sb, storage_key=sk)
-                for k, u, w, sb, sk in rows]
+        asset_decisions = {}
+        if rows:
+            asset_decisions = dict(s.execute(
+                select(Decision.entity_id, Decision.decision).where(
+                    Decision.entity_type == "media_asset",
+                    Decision.entity_id.in_([str(row[0]) for row in rows]),
+                    Decision.stage == "verify",
+                    Decision.decision.in_(("media_clean", "media_reuse")),
+                )
+            ).all())
+
+        out = []
+        for media_id, kind, url, width, size_bytes, storage_key in rows:
+            if asset_decisions.get(str(media_id)) == "media_reuse":
+                continue
+            out.append(MediaItem(kind=kind, url=url, width=width,
+                                 size_bytes=size_bytes, storage_key=storage_key))
+        return out
+
+    def _prepare_media(self, publication_id: int) -> str | None:
+        """Authorize approved-only downloads and persist/wait on media readiness.
+
+        Returns a wait reason while discovery, downloads, or checks are outstanding;
+        otherwise None (ready, no media, unavailable, or safely blocked -> text-only).
+        """
+        from sqlalchemy import select
+
+        from newsroom.media.state import (
+            PUBLICATION_MEDIA_CHECKING,
+            PUBLICATION_MEDIA_DISCOVERING,
+            PUBLICATION_MEDIA_PENDING,
+            event_media_readiness,
+            persist_publication_media_state,
+        )
+        from newsroom.models import Decision, Publication
+
+        with self.sf() as s:
+            pub = s.get(Publication, publication_id)
+            if pub is None or pub.status != "draft" or pub.event_id is None:
+                return None
+            previous = pub.media_status
+            if pub.media_approved_at is None:
+                pub.media_approved_at = _utc_now()
+
+            decisions = set(s.execute(
+                select(Decision.decision).where(
+                    Decision.entity_type == "event",
+                    Decision.entity_id == str(pub.event_id),
+                    Decision.stage == "verify",
+                    Decision.decision.in_(("media_clean", "media_reuse",
+                                           "media_vision_ok", "media_vision_block")),
+                )
+            ).scalars().all())
+            reuse_done = (not self.require_media_check
+                          or bool({"media_clean", "media_reuse"} & decisions))
+            vision_done = (not self.require_vision
+                           or bool({"media_vision_ok", "media_vision_block"} & decisions))
+            blocked = "media_reuse" in decisions or "media_vision_block" in decisions
+            readiness = event_media_readiness(s, pub.event_id)
+            status = persist_publication_media_state(
+                s, pub, readiness, checked=(reuse_done and vision_done), blocked=blocked)
+            if status != previous:
+                s.add(Decision(
+                    entity_type="publication", entity_id=str(pub.id), stage="media",
+                    decision=f"media_{status}",
+                    reason="waiting for approved media" if status in {
+                        PUBLICATION_MEDIA_DISCOVERING,
+                        PUBLICATION_MEDIA_PENDING,
+                        PUBLICATION_MEDIA_CHECKING,
+                    } else None,
+                    details={
+                        "has_media": readiness.has_media,
+                        "expected": readiness.expected,
+                        "ready": readiness.ready,
+                        "failed": readiness.failed,
+                        "pending": readiness.pending,
+                        "discovery_pending": readiness.discovery_pending,
+                    },
+                    charter_version=self.charter_version,
+                ))
+            s.commit()
+
+        if status in {PUBLICATION_MEDIA_DISCOVERING,
+                      PUBLICATION_MEDIA_PENDING,
+                      PUBLICATION_MEDIA_CHECKING}:
+            return f"media_{status}"
+        return None
 
     def _media_choice(self, s, event_id):
         """The single best media to attach (video → widest image → none)."""
@@ -355,6 +482,38 @@ class Publisher:
         from newsroom.publishers.telegram import TELEGRAM_CAPTION_LEN
 
         group = choose_media_group(media_items)
+        # A Telegram caption is limited to 1024 chars. Preserve both the complete
+        # article and its media: send the text first, then attach the album/single
+        # asset as a reply. If that second send fails, the already-delivered news is
+        # still a valid text post and is not duplicated on retry.
+        if media_items and len(body) > TELEGRAM_CAPTION_LEN:
+            from newsroom.publishers.telegram import PublishResult
+
+            text_result = self.telegram.send_text(
+                body, reply_to_message_id=reply_to_message_id)
+            if not text_result.ok:
+                return text_result
+
+            if len(group) >= 2:
+                media_result = self.telegram.send_media_group(
+                    group, "", reply_to_message_id=text_result.message_id,
+                    attachments=self._group_attachments(group))
+                if media_result.ok:
+                    return PublishResult(True, message_id=text_result.message_id, media_sent=True)
+                log.warning("long-post album send failed; trying single media",
+                            extra={"publication_id_": publication_id, "error": media_result.error})
+
+            media_choice = choose_media(media_items)
+            media_file = self._media_file(media_choice) if media_choice is not None else None
+            if media_choice is not None and (media_file is not None or media_choice.url):
+                media_result = self.telegram.send_media(
+                    media_choice, "", reply_to_message_id=text_result.message_id, file=media_file)
+                if media_result.ok:
+                    return PublishResult(True, message_id=text_result.message_id, media_sent=True)
+                log.warning("long-post media send failed; keeping text post",
+                            extra={"publication_id_": publication_id, "error": media_result.error})
+            return text_result
+
         if len(group) >= 2 and 0 < len(body) <= TELEGRAM_CAPTION_LEN:
             attachments = self._group_attachments(group)
             result = self.telegram.send_media_group(
@@ -465,6 +624,19 @@ class Publisher:
             "confidence": verdict.confidence, **(verdict.signals or {}),
         }
         with self.sf() as s:
+            pub_for_trace = s.get(Publication, publication_id)
+            incoming_event_id = pub_for_trace.event_id if pub_for_trace else None
+            for pair in verdict.pair_checks:
+                candidate_id = pair.get("candidate_event_id")
+                s.add(Decision(
+                    entity_type="event",
+                    entity_id=str(incoming_event_id) if incoming_event_id is not None else str(publication_id),
+                    stage="predup_pair", decision=f"pair_{pair.get('decision', 'unknown')}",
+                    reason=(str(pair.get("reason"))[:300] if pair.get("reason") else None),
+                    details={**pair, "publication_id": publication_id, "enforced": enforce},
+                    score=pair.get("confidence"), ref_id=candidate_id,
+                    model=verdict.model, charter_version=self.charter_version,
+                ))
             if enforce and action != ACTION_SEPARATE:
                 pub = s.get(Publication, publication_id)
                 event = s.get(Event, pub.event_id) if pub and pub.event_id else None
@@ -507,6 +679,7 @@ class Publisher:
                 entity_type="publication", entity_id=str(publication_id), stage="predup",
                 decision=f"predup_{action}", reason=verdict.reason or None, details=details,
                 model=verdict.model, charter_version=self.charter_version,
+                score=verdict.confidence, ref_id=verdict.canonical_event_id,
             ))
             s.commit()
 

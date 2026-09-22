@@ -15,7 +15,8 @@ EXPECTED_TABLES = {
     "entities", "item_entities", "events", "event_items", "stories",
     "story_versions", "claims", "claim_evidence", "publications",
     "publication_metrics", "channel_metrics", "reputation_events",
-    "decisions", "system_state",
+    "decisions", "system_state", "item_metrics", "source_metrics",
+    "facet_dimensions", "facet_values", "event_facets", "facet_pair_metrics",
 }
 
 

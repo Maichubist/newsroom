@@ -115,6 +115,44 @@ def test_critical_events_go_through_the_ranker(pg_engine):
 
 
 @pytest.mark.pg
+def test_curate_decision_records_signals_and_score(pg_engine):
+    # each curate decision must journal WHY (the signals the ranker weighed), not just publish/hold —
+    # so the trace can explain every publication.
+    from sqlalchemy import select
+
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, Source
+
+    sf = make_session_factory(pg_engine)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@mil_sig", name="Військові", origin="ua",
+                     tier="official", is_official=True)
+        s.add(src)
+        s.flush()
+        ev = Event(status="confirmed", risk_level="critical", rubric="war", title="Удар по Одесі",
+                   first_seen_at=now, fact_base={"facts": [{"text": "влучання в порт", "confirmed_by": 2}]})
+        s.add(ev)
+        s.flush()
+        it = Item(source_id=src.id, external_id="sig1", content_hash="c".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id, role="official"))
+        eid = ev.id
+        s.commit()
+
+    curate_pending(sf, FakeRanker({eid: "publish"}))
+
+    with Session(pg_engine) as s:
+        d = s.execute(select(Decision).where(
+            Decision.stage == "edit", Decision.decision == "curate_publish",
+            Decision.entity_id == str(eid))).scalar_one()
+        assert d.details["rubric"] == "war" and d.details["risk"] == "critical"
+        assert d.details["facts"] == 1                       # one fact was shown to the ranker
+        assert set(d.details) >= {"must", "rubric", "risk", "demand", "heat", "age_hours", "facts"}
+
+
+@pytest.mark.pg
 def test_curate_pending_passes_learned_demand_to_ranker(pg_engine):
     from newsroom.analyze.demand import store_demand
     from newsroom.db import make_session_factory

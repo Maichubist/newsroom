@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from newsroom.analyze.clustering import DEFAULT_THRESHOLD, DEFAULT_WINDOW_HOURS, EventClusterer
+from newsroom.analyze.facets import FacetAssignment
 from newsroom.analyze.independence import SourceItem, independent_source_count
 from newsroom.analyze.risk import RiskMatrix, decide
 from newsroom.analyze.signal import FiltersConfig, classify_noise, ipso_markers, is_air_alert
@@ -39,9 +40,13 @@ class Classification:
     is_first_source: bool = False   # document / court ruling / party's own statement
     is_rumor: bool = False          # leak-channel rumor (charter 3.7)
     keywords: list[str] = field(default_factory=list)   # 5-10 topic keywords (hot-topics layer)
+    compact_facts: list[dict] = field(default_factory=list)  # evidence-preserving, max 6
     # broad->specific topic path for the learned taxonomy pyramid (charter v0.3 §3.1),
     # e.g. ["війна", "атака рф", "удар бпла", "одеса"]. Emergent, not a fixed list.
     topic_path: list[str] = field(default_factory=list)
+    # Typed, evidence-backed multi-label facets. Unlike topic_path these are independent
+    # axes (event_type, geography, actor, target, impact...) rather than one forced chain.
+    facets: list[FacetAssignment] = field(default_factory=list)
 
 
 class Classifier(Protocol):
@@ -78,6 +83,10 @@ class Verifier:
         window_hours: int = DEFAULT_WINDOW_HOURS,
         charter_version: str = "0.3",
         spine=None,
+        facets_enabled: bool = True,
+        ingest_dedup=None,
+        ingest_dedup_enforce: bool = False,
+        ingest_canonical_by_tier: bool = False,
     ):
         self.sf = session_factory
         self.classifier = classifier
@@ -88,6 +97,10 @@ class Verifier:
         # name, Ukrainian root, or a new slug) is normalized to its spine slug. None =
         # old behaviour (risk.yaml + raw rubric).
         self.spine = spine
+        self.facets_enabled = bool(facets_enabled)
+        self.ingest_dedup = ingest_dedup
+        self.ingest_dedup_enforce = bool(ingest_dedup_enforce)
+        self.ingest_canonical_by_tier = bool(ingest_canonical_by_tier)
         self.filters = filters
         self.stoplist_rules = stoplist_rules
         self.clusterer = EventClusterer(session_factory, threshold=threshold, window_hours=window_hours)
@@ -120,22 +133,43 @@ class Verifier:
 
         # 2. embed + persist + cluster into an event (cheap; runs before the LLM so
         #    reprints collapse into one event before we pay to classify)
-        vec = self.embedder.embed(f"{title or ''}\n{text or ''}")
+        from newsroom.llmutil import llm_context
+
+        with llm_context(item_id=item_id, stage="verify_embed"):
+            vec = self.embedder.embed(f"{title or ''}\n{text or ''}")
         self._store_embedding(item_id, vec)
         assign = self.clusterer.assign(item_id, vec)
         self._set_item_status(item_id, "clustered")
 
+        # 2b. A genuinely new event is checked for a recent twin immediately, before
+        #     paying for its classifier. Existing-cluster joins already reuse that event's
+        #     classification. The background sweep remains as crash/backlog insurance.
+        active_event_id = assign.event_id
+        ingest_action = None
+        if assign.created_new and self.ingest_dedup is not None:
+            from newsroom.analyze.ingest_dedup import dedup_one_event
+
+            early = dedup_one_event(
+                self.sf, self.ingest_dedup, assign.event_id,
+                enforce=self.ingest_dedup_enforce,
+                canonical_by_tier=self.ingest_canonical_by_tier,
+                charter_version=self.charter_version,
+            )
+            active_event_id = early.event_id
+            ingest_action = early.verdict.action
+
         # 3. classify the event ONCE (LLM in prod). Items that join an already-
         #    classified event reuse the cached classification and cost nothing.
-        cls, newly_classified = self._classify_event(assign.event_id, title, text)
+        cls, newly_classified = self._classify_event(active_event_id, title, text,
+                                                      source_item_id=item_id)
         if not cls.is_event:
             # the whole cluster is not a news event: drop its items, retire the event
-            self._retire_non_event(assign.event_id)
+            self._retire_non_event(active_event_id)
             self._journal("item", item_id, "filter", "not_event", "")
             return VerifyResult("filtered_out", reason="not_event")
 
         # 4. event evidence + risk gate (re-runs per item so corroboration updates)
-        event_status, level, indep = self._verify_event(assign.event_id, cls)
+        event_status, level, indep = self._verify_event(active_event_id, cls)
 
         markers = ipso_markers(title, text, self.filters)
         violations = stoplist_check(title, text, self.stoplist_rules, side=cls.side)
@@ -143,8 +177,10 @@ class Verifier:
             "item", item_id, "verify", event_status,
             reason=f"level={level} independent_sources={indep}",
             details={
-                "event_id": assign.event_id,
+                "event_id": active_event_id,
+                "cluster_event_id": assign.event_id,
                 "created_new_event": assign.created_new,
+                "ingest_dedup_action": ingest_action,
                 "newly_classified": newly_classified,
                 "similarity": round(assign.similarity, 4),
                 "rubrics": cls.rubrics,
@@ -154,10 +190,11 @@ class Verifier:
             },
             model=getattr(self.classifier, "model", None),
         )
-        return VerifyResult("clustered", assign.event_id, event_status)
+        return VerifyResult("clustered", active_event_id, event_status)
 
     # ------------------------------------------------------------------
-    def _classify_event(self, event_id: int, title: str | None, text: str | None) -> tuple[Classification, bool]:
+    def _classify_event(self, event_id: int, title: str | None, text: str | None,
+                        *, source_item_id: int | None = None) -> tuple[Classification, bool]:
         """Classify an event once (LLM) and cache the result on the event row.
 
         Returns (classification, newly_classified). If the event was already
@@ -179,10 +216,15 @@ class Verifier:
                     is_first_source=bool(event.is_first_source),
                     is_rumor=bool(event.is_rumor),
                     keywords=list(event.keywords or []),
+                    compact_facts=list(event.compact_facts or []),
                     topic_path=list(event.topic_path or []),
+                    facets=self._load_cached_facets(s, event_id),
                 ), False
 
-        cls = self.classifier.classify(title, text)
+        from newsroom.llmutil import llm_context
+
+        with llm_context(event_id=event_id, item_id=source_item_id, stage="classify"):
+            cls = self.classifier.classify(title, text)
 
         with self.sf() as s:
             event = s.get(Event, event_id)
@@ -191,21 +233,43 @@ class Verifier:
                 event.is_first_source = cls.is_first_source
                 event.is_rumor = cls.is_rumor
                 event.keywords = list(cls.keywords) or None
+                event.compact_facts = list(cls.compact_facts) or None
                 # learned taxonomy: record the path and link the event to its leaf node,
                 # building the tree from data (charter v0.3 §3.1)
                 event.topic_path = list(cls.topic_path) or None
                 if cls.is_event and cls.topic_path:
                     from newsroom.analyze.taxonomy import ingest_path
                     event.topic_leaf_id = ingest_path(s, cls.topic_path)
+                if cls.is_event and self.facets_enabled:
+                    from newsroom.analyze.facets import ingest_event_facets
+
+                    canonical_rubrics = [
+                        (self.spine.resolve(rubric) or rubric) if self.spine is not None else rubric
+                        for rubric in cls.rubrics
+                    ]
+                    ingest_event_facets(
+                        s, event_id, cls.facets, source_item_id=source_item_id,
+                        primary_rubric=(canonical_rubrics[0] if canonical_rubrics else None),
+                        secondary_rubrics=canonical_rubrics[1:],
+                    )
                 event.classifier_model = getattr(self.classifier, "model", "unknown")
                 s.commit()
         self._journal(
             "event", event_id, "classify", "event" if cls.is_event else "not_event",
             reason=f"rubrics={','.join(cls.rubrics)} side={cls.side}",
-            details={"is_first_source": cls.is_first_source, "is_rumor": cls.is_rumor},
+            details={
+                "is_first_source": cls.is_first_source, "is_rumor": cls.is_rumor,
+                "facets": len(cls.facets),
+            },
             model=getattr(self.classifier, "model", None),
         )
         return cls, True
+
+    @staticmethod
+    def _load_cached_facets(session, event_id: int) -> list[FacetAssignment]:
+        from newsroom.analyze.facets import load_event_assignments
+
+        return load_event_assignments(session, event_id)
 
     # ------------------------------------------------------------------
     def _retire_non_event(self, event_id: int) -> None:

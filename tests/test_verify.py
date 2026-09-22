@@ -170,6 +170,50 @@ def test_classifier_runs_once_per_event(pg_engine):
         assert s.get(Event, r1.event_id).classifier_model == "count-clf"
 
 
+def test_ingest_dedup_merges_before_classifier(pg_engine):
+    import datetime as dt
+
+    from newsroom.analyze.ingest_dedup import MERGE_DUPLICATE, MergeVerdict
+
+    class FakeEarlyDedup:
+        def __init__(self, canonical_id):
+            self.canonical_id = canonical_id
+
+        def check(self, event_id):
+            return MergeVerdict(action=MERGE_DUPLICATE, mode="auto",
+                                canonical_event_id=self.canonical_id,
+                                reason="test exact", confidence=1.0)
+
+    with Session(pg_engine) as s:
+        sid = _source(s, "vrf-early-dedup")
+        old_item = _item(s, sid, "old", "Стара версія", "budget old")
+        canonical = Event(
+            status="confirmed", title="Канонічна подія", centroid=_vec(10),
+            rubric="economy", risk_level="low", side="ua", classifier_model="cached",
+            first_seen_at=dt.datetime.now(dt.timezone.utc),
+        )
+        s.add(canonical)
+        s.flush()
+        s.add(EventItem(event_id=canonical.id, item_id=old_item, role="origin", similarity=1.0))
+        incoming = _item(s, sid, "incoming", "Нова копія", "текст копії")
+        canonical_id = canonical.id
+        s.commit()
+
+    clf = CountingClassifier(Classification(is_event=True, rubrics=["war"]))
+    v = Verifier(
+        make_session_factory(pg_engine), classifier=clf, embedder=FakeEmbedder(),
+        risk_matrix=RISK, filters=FILTERS, stoplist_rules=STOP,
+        ingest_dedup=FakeEarlyDedup(canonical_id), ingest_dedup_enforce=True,
+    )
+    result = v.verify_item(incoming)
+    assert result.event_id == canonical_id and clf.calls == 0
+    with Session(pg_engine) as s:
+        assert s.execute(select(EventItem.event_id).where(
+            EventItem.item_id == incoming)).scalar_one() == canonical_id
+        dropped = s.execute(select(Event).where(Event.duplicate_of == canonical_id)).scalar_one()
+        assert dropped.classifier_model is None
+
+
 def test_non_event_cluster_is_retired(pg_engine):
     # an item that clears the noise filter but the classifier deems a non-event:
     # its cluster is retired (centroid cleared) so it never attracts more items.

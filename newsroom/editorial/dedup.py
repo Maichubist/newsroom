@@ -139,7 +139,10 @@ def dedup_pending(session_factory, grouper: "DedupGrouper", *, window_hours: int
     if len(events) < 2:
         return {"events": len(events), "groups": 0, "duplicates": 0}
 
-    groups = grouper.group(events)
+    from newsroom.llmutil import llm_context
+
+    with llm_context(stage="batch_dedup", event_ids=[eid for eid, _ in events]):
+        groups = grouper.group(events)
     dups = 0
     merged = 0
     with session_factory() as s:

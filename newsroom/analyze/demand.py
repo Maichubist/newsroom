@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
 from typing import Protocol
 
 from newsroom.publishers.metrics import MessageStats
@@ -23,6 +24,7 @@ log = logging.getLogger("newsroom.analyze.demand")
 # forwards are active sharing ("worth passing on"), a better value signal than an
 # emotional reaction — weight them higher in the engagement rate.
 DEFAULT_FORWARD_WEIGHT = 2.0
+DEFAULT_COMMENT_WEIGHT = 1.5
 
 # Manipulation discount: aggregator/anonymous channels are the most botted/IPSO-prone,
 # so their engagement counts for less when we learn what the audience genuinely wants.
@@ -32,15 +34,34 @@ DEMAND_STATE_KEY = "demand_by_rubric"
 
 
 def engagement_rate(stats: MessageStats, subscribers: int | None,
-                    *, forward_weight: float = DEFAULT_FORWARD_WEIGHT) -> float | None:
-    """Reach-normalised engagement: (reactions + weighted forwards) / subscribers.
-    None when subscribers is unknown/zero — a raw count without reach is misleading
-    (10k views means opposite things on a 50k vs a 2M channel)."""
+                    *, forward_weight: float = DEFAULT_FORWARD_WEIGHT,
+                    comment_weight: float = DEFAULT_COMMENT_WEIGHT,
+                    post_age_hours: float | None = None) -> float | None:
+    """Age/reach-normalised audience response for one Telegram post.
+
+    Views measure reach; reactions/forwards/comments measure active response per viewer.
+    When a snapshot age is known, reach is divided by a bounded Telegram growth curve so a
+    five-minute post is not compared directly with a three-hour post.  None means there is
+    no subscriber denominator and the raw counts would be misleading.
+    """
     if not subscribers or subscribers <= 0:
         return None
     reacts = sum((stats.reactions or {}).values())
     forwards = stats.forwards or 0
-    return (reacts + forward_weight * forwards) / subscribers
+    comments = stats.comments or 0
+    views = max(int(stats.views or 0), 0)
+    reach_rate = views / subscribers
+    if post_age_hours is not None:
+        age = max(float(post_age_hours), 0.0)
+        # Most Telegram reach accumulates in the first hours.  The 10% floor avoids
+        # exploding a just-published post while still making age a first-class signal.
+        maturity = max(1.0 - math.exp(-age / 6.0), 0.10)
+        reach_rate /= maturity
+    actions = reacts + forward_weight * forwards + comment_weight * comments
+    action_rate = actions / (views if views > 0 else subscribers)
+    # Reach and active response are deliberately separate; forwards/comments cannot be
+    # hidden by a giant subscriber denominator once actual views are known.
+    return 0.65 * reach_rate + 0.35 * action_rate
 
 
 class DemandSource(Protocol):
@@ -54,7 +75,8 @@ def record_item_metric(session, item_id: int, stats: MessageStats) -> int:
     from newsroom.models import ItemMetric
 
     row = ItemMetric(item_id=item_id, views=stats.views,
-                     reactions=stats.reactions, forwards=stats.forwards)
+                     reactions=stats.reactions, forwards=stats.forwards,
+                     comments=stats.comments)
     session.add(row)
     session.flush()
     return row.id
@@ -187,7 +209,8 @@ def compute_rubric_demand(session, *, window_days: int = 7,
     # latest engagement snapshot per measured item in the window, with tier + rubric
     rows = session.execute(
         select(ItemMetric.item_id, ItemMetric.views, ItemMetric.reactions, ItemMetric.forwards,
-               ItemMetric.measured_at, Source.id, Source.tier, Event.rubric)
+               ItemMetric.comments, ItemMetric.measured_at, Item.published_at,
+               Source.id, Source.tier, Event.rubric)
         .join(Item, Item.id == ItemMetric.item_id)
         .join(Source, Source.id == Item.source_id)
         .join(EventItem, EventItem.item_id == Item.id)
@@ -198,12 +221,16 @@ def compute_rubric_demand(session, *, window_days: int = 7,
 
     seen: set[int] = set()
     by_rubric: dict[str, list[float]] = {}
-    for item_id, views, reactions, forwards, _at, source_id, tier, rubric in rows:
+    for item_id, views, reactions, forwards, comments, measured_at, published_at, source_id, tier, rubric in rows:
         if item_id in seen:
             continue                        # keep only the latest snapshot per item
         seen.add(item_id)
-        rate = engagement_rate(MessageStats(views=views, reactions=reactions, forwards=forwards),
-                               subs.get(source_id), forward_weight=forward_weight)
+        age_hours = None
+        if measured_at is not None and published_at is not None:
+            age_hours = max((measured_at - published_at).total_seconds() / 3600.0, 0.0)
+        rate = engagement_rate(
+            MessageStats(views=views, reactions=reactions, forwards=forwards, comments=comments),
+            subs.get(source_id), forward_weight=forward_weight, post_age_hours=age_hours)
         if rate is None:
             continue
         weighted = rate * TIER_WEIGHT.get((tier or "").lower(), 0.5)
@@ -249,9 +276,10 @@ def refresh_demand(session_factory, *, window_days: int = 7) -> dict[str, float]
     """One analytics tick: recompute per-rubric demand and store it. Returns the index."""
     with session_factory() as s:
         by_rubric = compute_rubric_demand(s, window_days=window_days)
-        if by_rubric:
-            store_demand(s, by_rubric)
-            s.commit()
+        # Persist even an empty snapshot: absence and a computed empty result are different
+        # operational states, and the timestamp proves the analytics loop is alive.
+        store_demand(s, by_rubric)
+        s.commit()
     return by_rubric
 
 
@@ -289,9 +317,11 @@ class TelethonDemandSource:  # pragma: no cover - network / MTProto
             for r in msg.reactions.results:
                 emoticon = getattr(getattr(r, "reaction", None), "emoticon", None) or "?"
                 reactions[emoticon] = getattr(r, "count", 0)
+        replies = getattr(getattr(msg, "replies", None), "replies", None)
         return MessageStats(views=getattr(msg, "views", None),
                             reactions=reactions or None,
-                            forwards=getattr(msg, "forwards", None))
+                            forwards=getattr(msg, "forwards", None),
+                            comments=replies)
 
     def subscribers(self, handle: str) -> int | None:
         from telethon.tl.functions.channels import GetFullChannelRequest

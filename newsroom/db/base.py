@@ -48,6 +48,7 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS is_rumor boolean",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS classifier_model varchar(64)",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS keywords jsonb",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS compact_facts jsonb",
     # learned taxonomy pyramid (charter v0.3 §3.1)
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS topic_path jsonb",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS topic_leaf_id bigint",
@@ -57,15 +58,46 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS heat_at timestamptz",
     # audience-engagement demand per node (L1+L2 popularity), computed alongside heat
     "ALTER TABLE taxonomy_nodes ADD COLUMN IF NOT EXISTS demand double precision DEFAULT 0.0",
+    # faceted engagement metrics: comments are Telegram discussion replies. New facet
+    # tables themselves are created by metadata.create_all above.
+    "ALTER TABLE item_metrics ADD COLUMN IF NOT EXISTS comments integer",
+    "ALTER TABLE publication_metrics ADD COLUMN IF NOT EXISTS comments integer",
     # local media file deleted after publication (phash reuse-archive stays in DB)
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS purged_at timestamptz",
     # Telegram message id for re-fetching url-less media via Telethon
     "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS source_ref text",
+    # approved-only media lifecycle / bounded retry queue
+    "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS download_status varchar(16) DEFAULT 'pending' NOT NULL",
+    "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS download_attempts integer DEFAULT 0 NOT NULL",
+    "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS download_error text",
+    "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS next_retry_at timestamptz",
+    "ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS downloaded_at timestamptz",
+    "CREATE INDEX IF NOT EXISTS ix_media_assets_download_status ON media_assets (download_status)",
+    "CREATE INDEX IF NOT EXISTS idx_media_download_queue "
+    "ON media_assets (download_status, next_retry_at, id) WHERE storage_key IS NULL",
+    # publication-level snapshot: whether the approved news has media and why it waits
+    "ALTER TABLE publications ADD COLUMN IF NOT EXISTS has_media boolean DEFAULT false NOT NULL",
+    "ALTER TABLE publications ADD COLUMN IF NOT EXISTS media_status varchar(16) DEFAULT 'none' NOT NULL",
+    "ALTER TABLE publications ADD COLUMN IF NOT EXISTS media_expected_count integer DEFAULT 0 NOT NULL",
+    "ALTER TABLE publications ADD COLUMN IF NOT EXISTS media_ready_count integer DEFAULT 0 NOT NULL",
+    "ALTER TABLE publications ADD COLUMN IF NOT EXISTS media_failed_count integer DEFAULT 0 NOT NULL",
+    "ALTER TABLE publications ADD COLUMN IF NOT EXISTS media_approved_at timestamptz",
+    # Backfill files downloaded before lifecycle tracking was introduced.
+    "UPDATE media_assets SET download_status = 'ready', downloaded_at = COALESCE(downloaded_at, first_seen_at) "
+    "WHERE storage_key IS NOT NULL AND download_status = 'pending'",
     # decisions is the hottest write path (every stage + observe-mode dedup logs here).
     # These indexes keep the frequent lookups (by entity, by stage/time) and retention
     # pruning fast as the table grows. Additive; safe to re-run.
     "CREATE INDEX IF NOT EXISTS idx_decisions_entity ON decisions (entity_type, entity_id, stage)",
     "CREATE INDEX IF NOT EXISTS idx_decisions_stage_created ON decisions (stage, created_at)",
+    # promoted trace fields (analyst-friendly; also kept in details JSONB)
+    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS score double precision",
+    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS ref_id bigint",
+    # cost attribution: primary event plus the compared event for pairwise dedup;
+    # context keeps item/source/batch identifiers without another schema change.
+    "ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS related_event_id bigint",
+    "ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS context jsonb",
+    "CREATE INDEX IF NOT EXISTS ix_llm_calls_related_event_id ON llm_calls (related_event_id)",
 )
 
 

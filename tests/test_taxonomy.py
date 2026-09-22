@@ -296,6 +296,25 @@ def test_merge_synonym_nodes_folds_siblings(pg_engine):
 
 
 @pytest.mark.pg
+def test_taxonomy_merge_skips_unchanged_sibling_set(pg_engine):
+    from newsroom.analyze.taxonomy import merge_synonym_nodes
+    from newsroom.db import make_session_factory
+
+    sf = make_session_factory(pg_engine)
+    with sf() as s:
+        ingest_path(s, ["економіка", "податки"])
+        ingest_path(s, ["економіка", "банки"])
+        s.commit()
+
+    grouper = FakeSynonymGrouper([])
+    first = merge_synonym_nodes(sf, grouper)
+    calls_after_first = len(grouper.seen)
+    second = merge_synonym_nodes(sf, grouper)
+    assert first["cached"] == 0 and calls_after_first >= 1
+    assert second["cached"] >= 1 and len(grouper.seen) == calls_after_first
+
+
+@pytest.mark.pg
 def test_merge_node_recurses_on_slug_collision(pg_engine):
     from sqlalchemy import select
 

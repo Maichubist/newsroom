@@ -5,6 +5,7 @@ import datetime as dt
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -62,6 +63,19 @@ class Publication(Base):
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # emotional vector, headline type, length, rubric
+    # Persisted media readiness snapshot. It is refreshed by the media workers and
+    # again immediately before publishing, so restarts never lose the reason a draft
+    # is waiting. media_status: none | discovering | pending | checking | ready |
+    # unavailable | blocked.
+    has_media: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    media_status: Mapped[str] = mapped_column(String(16), default="none", server_default="none")
+    media_expected_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    media_ready_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    media_failed_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Set only after the final text publish gate and pre-publish dedup pass. Media
+    # workers use this as their authorization boundary; it does not bypass a fresh
+    # gate evaluation immediately before delivery.
+    media_approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -77,6 +91,7 @@ class PublicationMetric(Base):
     views: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reactions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     forwards: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     publication: Mapped["Publication"] = relationship(back_populates="metrics")
 
@@ -101,6 +116,7 @@ class ItemMetric(Base):
     views: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reactions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     forwards: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class SourceMetric(Base):

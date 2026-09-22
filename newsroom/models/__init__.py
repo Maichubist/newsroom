@@ -17,7 +17,11 @@ from newsroom.models.analytical import (
     Claim,
     ClaimEvidence,
     Event,
+    EventFacet,
     EventItem,
+    FacetDimension,
+    FacetPairMetric,
+    FacetValue,
     Story,
     StoryVersion,
     TaxonomyNode,
@@ -37,18 +41,19 @@ from newsroom.models.publication import (
     SourceMetric,
     is_valid_publication_status,
 )
-from newsroom.models.service import Decision, ReputationEvent, SystemState
+from newsroom.models.service import Decision, LlmCall, ReputationEvent, SystemState
 
 __all__ = [
     # raw
     "Source", "Item", "ItemVersion", "MediaAsset", "ItemEmbedding", "Entity", "ItemEntity",
     # analytical
     "Event", "EventItem", "Story", "StoryVersion", "Claim", "ClaimEvidence", "TaxonomyNode",
+    "FacetDimension", "FacetValue", "EventFacet", "FacetPairMetric",
     # publication
     "Publication", "PublicationMetric", "ChannelMetric", "ItemMetric", "SourceMetric",
     "PUBLICATION_STATUSES", "is_valid_publication_status",
     "STATUS_DRAFT", "STATUS_PUBLISHED", "STATUS_PUBLISHING", "STATUS_REVIEW",
     "STATUS_SUPERSEDED", "STATUS_PUBLISH_AMBIGUOUS",
     # service
-    "ReputationEvent", "Decision", "SystemState",
+    "ReputationEvent", "Decision", "LlmCall", "SystemState",
 ]

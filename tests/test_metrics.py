@@ -17,6 +17,7 @@ def test_message_stats_is_empty():
     assert MessageStats().is_empty() is True
     assert MessageStats(views=0).is_empty() is False        # a zero view count is data
     assert MessageStats(reactions={"👍": 3}).is_empty() is False
+    assert MessageStats(comments=0).is_empty() is False
 
 
 class FakeSource:

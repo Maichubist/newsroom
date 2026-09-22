@@ -73,3 +73,8 @@ def setup_logging(level: str | None = None) -> None:
     root = logging.getLogger()
     root.handlers[:] = handlers
     root.setLevel(lvl)
+    # httpx logs the complete request URL at INFO. Telegram Bot API embeds the bot
+    # token in that URL, so letting the library logger inherit INFO writes a live
+    # credential to stdout and newsroom.log.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

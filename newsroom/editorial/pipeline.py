@@ -65,7 +65,8 @@ class EditorialPipeline:
             sources = [name for name, _ in source_links]
             title = event.title or ""
             risk_level = event.risk_level
-            facts = _facts_from_base(event.fact_base)
+            facts = (_facts_from_base(event.fact_base)
+                     or _facts_from_base({"facts": list(event.compact_facts or [])}))
             source_excerpt = _source_excerpt(s, event_id)
 
         is_rumor = status == "rumor"
@@ -83,7 +84,10 @@ class EditorialPipeline:
         # A generation that failed (fallback) or produced no real content must not
         # become a post: leave the event undrafted so the next tick retries it once
         # the model recovers (e.g. after a 429). Better a delay than a placeholder.
-        draft = self._generate_publishable(ctx)
+        from newsroom.llmutil import llm_context
+
+        with llm_context(event_id=event_id, stage="generate"):
+            draft = self._generate_publishable(ctx)
         if draft is None:
             self._journal_generation_failed(event_id)
             return ProduceResult(None, False, ["generation_failed"], [], False)
@@ -93,7 +97,8 @@ class EditorialPipeline:
         regenerated = False
         if not report.ok or report.soft:
             feedback = "; ".join(report.hard + report.soft)
-            retry = self.generator.generate(ctx, feedback=feedback)
+            with llm_context(event_id=event_id, stage="generate_retry"):
+                retry = self.generator.generate(ctx, feedback=feedback)
             if content_is_publishable(retry):        # keep the good first draft if the retry failed
                 draft = retry
                 post, report = self._compose_and_check(draft, reported, is_rumor, hashtags, sources)
@@ -168,6 +173,13 @@ class EditorialPipeline:
             )
             s.add(pub)
             s.flush()
+            # Persist immediately whether this approved/flagged draft owns media.
+            # Workers still require critic_ok=true before discovery/download, while
+            # the snapshot lets the publisher explain and survive a restart cleanly.
+            from newsroom.media.state import event_media_readiness, persist_publication_media_state
+
+            readiness = event_media_readiness(s, event_id)
+            persist_publication_media_state(s, pub, readiness, checked=False)
             pub_id = pub.id
             s.add(Decision(
                 entity_type="event", entity_id=str(event_id), stage="edit",
@@ -182,7 +194,8 @@ class EditorialPipeline:
 
 def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int = 25,
                    classify_grace_seconds: float = 180.0,
-                   require_curation: bool = False) -> dict[str, int]:
+                   require_curation: bool = False,
+                   require_factbase: bool = False) -> dict[str, int]:
     """One editorial tick: draft posts for publishable events that don't have a
     publication yet. Events the story-update step classified as summary-only
     (confirmation / reaction / minor) are skipped — they only update the story
@@ -223,6 +236,10 @@ def produce_drafts(session_factory, pipeline: "EditorialPipeline", *, limit: int
         # only draft events the editorial curation marked publish — count follows the
         # news, not a rate (must-publish events are marked publish deterministically)
         conditions.append(Event.curated == "publish")
+    if require_factbase:
+        # Curation runs cheaply from classifier compact_facts; the final expensive
+        # multi-source fact base must settle before generation consumes it.
+        conditions.append(Event.fact_base.is_not(None))
 
     with session_factory() as s:
         have_pub = select(Publication.event_id).where(Publication.event_id.is_not(None))

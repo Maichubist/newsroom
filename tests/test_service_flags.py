@@ -4,6 +4,8 @@ import pytest
 
 from newsroom.service import (
     editorial_enabled,
+    facet_curation_enabled,
+    facets_enabled,
     factbase_enabled,
     factcheck_enabled,
     media_check_enabled,
@@ -26,6 +28,8 @@ FLAGS = {
     "FACTCHECK_ENABLED": factcheck_enabled,
     "STORY_UPDATES_ENABLED": story_updates_enabled,
     "EDITORIAL_ENABLED": editorial_enabled,
+    "FACETS_ENABLED": facets_enabled,
+    "FACET_CURATION_ENABLED": facet_curation_enabled,
     "MEDIA_DOWNLOAD_ENABLED": media_download_enabled,
     "MEDIA_CHECK_ENABLED": media_check_enabled,
     "MEDIA_MODERATION_ENABLED": media_moderation_enabled,

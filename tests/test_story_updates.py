@@ -59,12 +59,14 @@ class FakeClassifier:
     def __init__(self, decision: UpdateDecision):
         self.model = "fake-update"
         self._decision = decision
+        self.calls = 0
 
     def classify(self, current_summary, event_title, fact_base):
+        self.calls += 1
         return self._decision
 
 
-def _linked_event(pg_engine, *, status="confirmed"):
+def _linked_event(pg_engine, *, status="confirmed", current_summary="Попередній стан"):
     """A story with one event and the bare StoryVersion the linker would create."""
     import uuid
 
@@ -72,6 +74,7 @@ def _linked_event(pg_engine, *, status="confirmed"):
 
     with Session(pg_engine) as s:
         story = Story(slug=f"s-{uuid.uuid4().hex[:8]}", title="Сюжет", state="developing",
+                      current_summary=current_summary,
                       last_event_at=dt.datetime.now(dt.timezone.utc))
         s.add(story)
         s.flush()
@@ -110,6 +113,27 @@ def test_classify_event_posts_and_fills_summary_and_version(pg_engine):
 
     # idempotent: update_type already set -> skipped
     assert updater.classify_event(event_id).skipped
+
+
+@pytest.mark.pg
+def test_first_story_event_is_seeded_without_llm(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, Story
+
+    sf = make_session_factory(pg_engine)
+    story_id, event_id = _linked_event(pg_engine, current_summary=None)
+    classifier = FakeClassifier(UpdateDecision(update_type=UPDATE_MINOR, summary="wrong"))
+    from newsroom.editorial.updates import StoryUpdater
+
+    result = StoryUpdater(sf, classifier=classifier).classify_event(event_id)
+    assert result.update_type == UPDATE_NEW_FACT and result.route == ROUTE_POST
+    assert classifier.calls == 0
+    with Session(pg_engine) as s:
+        assert s.get(Event, event_id).update_type == UPDATE_NEW_FACT
+        assert s.get(Story, story_id).current_summary == "Нова подія"
+        decision = s.execute(select(Decision).where(
+            Decision.entity_id == str(event_id), Decision.stage == "edit")).scalars().one()
+        assert decision.model == "deterministic:first_story_event"
 
 
 @pytest.mark.pg

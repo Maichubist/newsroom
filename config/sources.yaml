@@ -98,7 +98,59 @@ sources:
   - {name: "Офіс Президента", kind: telegram, handle_or_url: "@OP_UA", origin: ua, lang: uk, tier: official, is_official: true}
   - {name: "Володимир Зеленський", kind: telegram, handle_or_url: "@V_Zelenskiy_official", origin: ua, lang: uk, tier: official, is_official: true}
   - {name: "Михайло Драпатий (командувач СВ)", kind: telegram, handle_or_url: "@Drapatyi_KSV", origin: ua, lang: uk, tier: official, is_official: true}
-  - {name: "Мінцифри / Михайло Федоров", kind: telegram, handle_or_url: "@zedigital", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Михайло Федоров (Міністр оборони)", kind: telegram, handle_or_url: "@zedigital", origin: ua, lang: uk, tier: official, is_official: true}
+
+  # --- Уряд, силові, рятувальні, інфраструктура (кожен звірено на t.me, вер. 2026-09; ✔ = бейдж) ---
+  - {name: "ГУР МО України", kind: telegram, handle_or_url: "@DIUkraine", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Служба безпеки України (СБУ)", kind: telegram, handle_or_url: "@SBUkr", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "ДСНС України", kind: telegram, handle_or_url: "@dsns_telegram", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Національна поліція України", kind: telegram, handle_or_url: "@UA_National_Police", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Патрульна поліція України", kind: telegram, handle_or_url: "@patrolpolice_ua", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "МВС України", kind: telegram, handle_or_url: "@mvs_ukraine", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "МЗС України", kind: telegram, handle_or_url: "@Ukraine_MFA", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "МОЗ України", kind: telegram, handle_or_url: "@mozofficial", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Мінекономіки України", kind: telegram, handle_or_url: "@mineconomdevUA", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Мінсоцполітики України", kind: telegram, handle_or_url: "@MinSocUA", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Укренерго", kind: telegram, handle_or_url: "@Ukrenergo", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Укрзалізниця", kind: telegram, handle_or_url: "@UkrzalInfo", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Денис Шмигаль (Міністр енергетики)", kind: telegram, handle_or_url: "@Denys_Smyhal", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Віталій Кличко (мер Києва)", kind: telegram, handle_or_url: "@vitaliy_klitschko", origin: ua, lang: uk, region: Kyiv, tier: official, is_official: true}
+
+  # --- Обласні військові адміністрації (ОВА). Хендли з офіційного списку Кабміну (01.03.2022),
+  #     КОЖЕН перевірено t.me на актуальність (вер. 2026-09). Мертві/перехоплені виключено:
+  #     @vinnytskaODA(84 підп.), @mykolaivskaODA(«продається»), @pavlokyrylenko_donoda(гемблінг),
+  #     @DMYTROLUNIN(130 підп.). Живі й офіційні: ---
+  - {name: "Волинська ОВА", kind: telegram, handle_or_url: "@volynskaODA", origin: ua, lang: uk, region: Volyn, tier: official, is_official: true}
+  - {name: "Дніпропетровська ОВА", kind: telegram, handle_or_url: "@dnipropetrovskaODA", origin: ua, lang: uk, region: Dnipropetrovsk, tier: official, is_official: true}
+  - {name: "Житомирська ОВА", kind: telegram, handle_or_url: "@zhytomyrskaODA", origin: ua, lang: uk, region: Zhytomyr, tier: official, is_official: true}
+  - {name: "Закарпатська ОВА", kind: telegram, handle_or_url: "@zakarpatskaODA", origin: ua, lang: uk, region: Zakarpattia, tier: official, is_official: true}
+  - {name: "Київська ОВА", kind: telegram, handle_or_url: "@kyivoda", origin: ua, lang: uk, region: Kyiv, tier: official, is_official: true}
+  - {name: "Івано-Франківська ОВА", kind: telegram, handle_or_url: "@onyshchuksvitlana", origin: ua, lang: uk, region: "Ivano-Frankivsk", tier: official, is_official: true}
+  - {name: "Луганська ОВА", kind: telegram, handle_or_url: "@luhanskaVTSA", origin: ua, lang: uk, region: Luhansk, tier: official, is_official: true}
+  - {name: "Львівська ОВА", kind: telegram, handle_or_url: "@kozytskyy_maksym_official", origin: ua, lang: uk, region: Lviv, tier: official, is_official: true}
+  - {name: "Одеська ОВА", kind: telegram, handle_or_url: "@odeskaODA", origin: ua, lang: uk, region: Odesa, tier: official, is_official: true}
+  - {name: "Сумська ОВА", kind: telegram, handle_or_url: "@Zhyvytskyy", origin: ua, lang: uk, region: Sumy, tier: official, is_official: true}
+  - {name: "Тернопільська ОВА", kind: telegram, handle_or_url: "@ternopilskaODA", origin: ua, lang: uk, region: Ternopil, tier: official, is_official: true}
+  - {name: "Харківська ОВА", kind: telegram, handle_or_url: "@synegubov", origin: ua, lang: uk, region: Kharkiv, tier: official, is_official: true}
+  - {name: "Херсонська ОВА", kind: telegram, handle_or_url: "@khersonskaODA", origin: ua, lang: uk, region: Kherson, tier: official, is_official: true}
+  - {name: "Хмельницька ОВА", kind: telegram, handle_or_url: "@khmelnytskaODA", origin: ua, lang: uk, region: Khmelnytskyi, tier: official, is_official: true}
+  - {name: "Чернівецька ОВА", kind: telegram, handle_or_url: "@chernivetskaODA", origin: ua, lang: uk, region: Chernivtsi, tier: official, is_official: true}
+  - {name: "Чернігівська ОВА", kind: telegram, handle_or_url: "@chernigivskaODA", origin: ua, lang: uk, region: Chernihiv, tier: official, is_official: true}
+  # Живі, але канал КОЛИШНЬОГО голови (роль могла змінитись) — звір перед вмиканням:
+  - {name: "Запорізька ОВА (?Старух)", kind: telegram, handle_or_url: "@starukhofficial", origin: ua, lang: uk, region: Zaporizhzhia, tier: official, is_official: true, active: false}
+  - {name: "Кіровоградська ОВА (?Чорна)", kind: telegram, handle_or_url: "@chornamary", origin: ua, lang: uk, region: Kirovohrad, tier: official, is_official: true, active: false}
+  - {name: "Черкаська ОВА (?Скічко)", kind: telegram, handle_or_url: "@AleksandrSkichko", origin: ua, lang: uk, region: Cherkasy, tier: official, is_official: true, active: false}
+
+  # --- Військові бригади/підрозділи (кожен звірено на t.me, вер. 2026-09; топ за популярністю DeepState/Forbes) ---
+  - {name: "3-й армійський корпус (3 ОШБр)", kind: telegram, handle_or_url: "@ab3army", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "3-тя окрема штурмова бригада", kind: telegram, handle_or_url: "@ab3brigade", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Азов (1 корпус НГУ)", kind: telegram, handle_or_url: "@azov_media", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Сили спеціальних операцій (ССО)", kind: telegram, handle_or_url: "@ukr_sof", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "Десантно-штурмові війська (ДШВ)", kind: telegram, handle_or_url: "@ua_dshv", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "47 ОМБр «Маґура»", kind: telegram, handle_or_url: "@brygada47", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "414 бригада БпС «Птахи Мадяра»", kind: telegram, handle_or_url: "@magyarbirds414", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "72 ОМБр ім. Чорних Запорожців", kind: telegram, handle_or_url: "@ombr72", origin: ua, lang: uk, tier: official, is_official: true}
+  - {name: "93 ОМБр «Холодний Яр»", kind: telegram, handle_or_url: "@HolodniyYar_93ombr", origin: ua, lang: uk, tier: official, is_official: true}
 
   # --- Демонд-дзеркало: великі мейнстрім-новинні + агрегатори (аналіз попиту) ---
   # Дзеркало масової аудиторії для demand-intelligence (докс/demand-intelligence.md):
@@ -114,8 +166,9 @@ sources:
   # аґреґатори, OSINT-моніторинги і персональні блогери -> aggregator; анонімні
   # інсайдерські канали -> anonymous. За хартією (3.1) aggregator/anonymous НЕ
   # проходять gate самостійно для критичних тем (війна/оборона) — потрібне
-  # підтвердження офіційним або медіа-джерелом. Справжні official-канали
-  # (Генштаб @generalstaff_ua, Повітряні Сили @kpszsu тощо) додати окремо.
+  # підтвердження офіційним або медіа-джерелом. Справжні official-канали —
+  # вище (Генштаб @GeneralStaffZSU ✔, Повітряні Сили @kpszsu ✔ тощо; УВАГА:
+  # @generalstaff_ua — НЕ офіційний, 14k без бейджа, не плутати з @GeneralStaffZSU).
   - {name: "NEXTA Live", kind: telegram, handle_or_url: "@nexta_live", origin: ua, tier: aggregator}
   - {name: "INSIDER UA | Україна | Новини", kind: telegram, handle_or_url: "@insiderUKR", origin: ua, lang: uk, tier: aggregator}
   - {name: "STERNENKO", kind: telegram, handle_or_url: "@ssternenko", origin: ua, lang: uk, tier: aggregator}

@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import logging
 
+from newsroom.analyze.facets import FACET_DIMENSIONS, FacetAssignment
 from newsroom.analyze.verify import Classification
+from newsroom.promptutil import fill_prompt
 
 log = logging.getLogger("newsroom.analyze.classifier")
 
@@ -43,11 +45,23 @@ DEFAULT_PROMPT = """Ти редактор українського новинн�
   однини (базова форма: "дрон", "Покровськ", "мобілізація", "Зеленський"). Без
   службових слів і загальників ("новина", "Україна", "сьогодні"). Синоніми зводь до
   одного слова ("шахед"/"безпілотник" → "дрон").
+- facts: масив із 1–6 найважливіших атомарних фактів, достатніх для короткої новини.
+  Кожен: {"text": "...", "modality": "fact|statement|forecast",
+  "attribution": "хто заявив або null", "time_frame": "часова рамка або null",
+  "number": число або null, "unit": "одиниця або null"}. Не дублюй формулювання,
+  не додавай знань поза текстом і не перетворюй заяву/прогноз на встановлений факт.
 - topic_path: масив із 2–5 рівнів теми від НАЙШИРШОГО до найвужчого — «піраміда» теми.
   Кожен рівень — стисла тема українською в називному відмінку однини, у нижньому
   регістрі. Приклади: ["війна", "атака рф", "удар бпла", "одеса"];
   ["технології", "пристрої", "смартфон", "новинка"]; ["економіка", "бюджет", "пенсії"].
   Перший рівень — широка сфера, далі дедалі конкретніше. Без службових слів.
+- facets: масив незалежних фасетів. Це НЕ ще один topic_path. Кожен елемент:
+  {"dimension": "event_type|geography|actor|target|entity|sector|impact|means|audience_scope|story",
+   "path": ["ширше значення", "конкретніше значення"],
+   "confidence": 0.0–1.0, "evidence": "коротка дослівна опора з матеріалу"}.
+  Додавай лише підтверджені текстом значення. Не вигадуй масштаб, наслідки, засіб атаки
+  чи загальнонаціональний вплив. Для geography дозволена ієрархія країна→область→місто;
+  для target/sector — широка група→конкретний об'єкт. Максимум 16 фасетів.
 
 Матеріал:
 {news_text}"""
@@ -72,6 +86,61 @@ def parse_classification(raw: str | None) -> Classification | None:
     tp_raw = obj.get("topic_path") or []
     topic_path = ([str(t).strip().lower() for t in tp_raw if str(t).strip()][:5]
                   if isinstance(tp_raw, list) else [])
+    compact_facts: list[dict] = []
+    facts_raw = obj.get("facts") or []
+    if isinstance(facts_raw, list):
+        for row in facts_raw[:6]:
+            if not isinstance(row, dict):
+                continue
+            fact_text = str(row.get("text") or "").strip()
+            if not fact_text:
+                continue
+            modality = str(row.get("modality") or "fact").strip().lower()
+            if modality not in {"fact", "statement", "forecast"}:
+                modality = "fact"
+            number = row.get("number")
+            if number is not None and not isinstance(number, bool):
+                try:
+                    number = float(number)
+                except (TypeError, ValueError):
+                    number = None
+            else:
+                number = None
+            compact_facts.append({
+                "text": fact_text,
+                "modality": modality,
+                "attribution": (str(row.get("attribution")).strip()
+                                if row.get("attribution") else None),
+                "time_frame": (str(row.get("time_frame")).strip()
+                               if row.get("time_frame") else None),
+                "number": number,
+                "unit": str(row.get("unit")).strip() if row.get("unit") else None,
+            })
+    facets: list[FacetAssignment] = []
+    facets_raw = obj.get("facets") or []
+    if isinstance(facets_raw, list):
+        for row in facets_raw[:16]:
+            if not isinstance(row, dict):
+                continue
+            dimension = str(row.get("dimension") or "").strip().lower()
+            if dimension not in FACET_DIMENSIONS or dimension == "domain":
+                continue
+            path_raw = row.get("path") or []
+            if isinstance(path_raw, str):
+                path_raw = [path_raw]
+            if not isinstance(path_raw, list):
+                continue
+            path = tuple(str(x).strip() for x in path_raw[:4] if str(x).strip())
+            if not path:
+                continue
+            try:
+                confidence = min(1.0, max(0.0, float(row.get("confidence", 0.0))))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            facets.append(FacetAssignment(
+                dimension=dimension, path=path, confidence=confidence,
+                evidence=str(row.get("evidence") or "").strip()[:500],
+            ))
     return Classification(
         is_event=bool(obj.get("is_event")),
         rubrics=rubrics,
@@ -79,7 +148,9 @@ def parse_classification(raw: str | None) -> Classification | None:
         is_first_source=bool(obj.get("is_first_source")),
         is_rumor=bool(obj.get("is_rumor")),
         keywords=keywords,
+        compact_facts=compact_facts,
         topic_path=topic_path,
+        facets=facets,
     )
 
 
@@ -111,8 +182,8 @@ class LLMClassifier:  # pragma: no cover - network
 
             return chat_json(
                 self._ensure_client(), model=self.model,
-                messages=[{"role": "user", "content": self.prompt.format(news_text=news_text)}],
-                op="classify", max_tokens=512)
+                messages=[{"role": "user", "content": fill_prompt(self.prompt, news_text=news_text)}],
+                op="classify", max_tokens=768)
         except Exception as exc:  # noqa: BLE001
             log.warning("classifier call failed", extra={"error": str(exc)})
             return None
