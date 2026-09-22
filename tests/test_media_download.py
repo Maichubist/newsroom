@@ -98,8 +98,9 @@ def test_local_store_delete_is_idempotent_and_prunes_shard(tmp_path):
 
 # --- MediaDownloader (pg) -----------------------------------------------------
 
-def _seed_asset(pg_engine, *, item_status="accepted", url="http://x/a.jpg", kind="image"):
-    from newsroom.models import Item, MediaAsset, Source
+def _seed_asset(pg_engine, *, item_status="accepted", url="http://x/a.jpg", kind="image",
+                approved=False):
+    from newsroom.models import Event, EventItem, Item, MediaAsset, Publication, Source
 
     with Session(pg_engine) as s:
         src = Source(kind="rss", handle_or_url=f"https://d/{url}", name="D", origin="ua", tier="media")
@@ -111,6 +112,16 @@ def _seed_asset(pg_engine, *, item_status="accepted", url="http://x/a.jpg", kind
         ma = MediaAsset(item_id=it.id, kind=kind, url=url)
         s.add(ma)
         s.flush()
+        if approved:
+            ev = Event(status="confirmed", title="approved")
+            s.add(ev)
+            s.flush()
+            s.add(EventItem(event_id=ev.id, item_id=it.id))
+            s.add(Publication(
+                event_id=ev.id, channel="telegram", kind="post", status="draft",
+                headline="h", body="b", features={"critic_ok": True},
+                media_approved_at=dt.datetime.now(UTC),
+            ))
         mid = ma.id
         s.commit()
         return mid
@@ -138,13 +149,14 @@ def test_download_stores_and_hashes_image(pg_engine, tmp_path):
 
 
 @pytest.mark.pg
-def test_download_pending_only_filter_passed(pg_engine, tmp_path):
+def test_download_pending_only_approved_publication(pg_engine, tmp_path):
     from newsroom.db import make_session_factory
     from newsroom.models import MediaAsset
 
     sf = make_session_factory(pg_engine)
-    kept = _seed_asset(pg_engine, item_status="accepted")
+    kept = _seed_asset(pg_engine, item_status="accepted", approved=True)
     dropped = _seed_asset(pg_engine, item_status="filtered_out", url="http://x/b.jpg")
+    unapproved = _seed_asset(pg_engine, item_status="accepted", url="http://x/c.jpg")
     dl = MediaDownloader(sf, store=LocalMediaStore(tmp_path), decoder=FakeDecoder(_pattern()),
                          fetch=lambda url: b"data")
 
@@ -153,6 +165,35 @@ def test_download_pending_only_filter_passed(pg_engine, tmp_path):
     with Session(pg_engine) as s:
         assert s.get(MediaAsset, kept).storage_key is not None
         assert s.get(MediaAsset, dropped).storage_key is None   # noise media never downloaded
+        assert s.get(MediaAsset, unapproved).storage_key is None  # critic/gate has not approved it
+
+
+@pytest.mark.pg
+def test_download_failure_retries_are_bounded(pg_engine, tmp_path):
+    from newsroom.db import make_session_factory
+    from newsroom.models import MediaAsset
+
+    sf = make_session_factory(pg_engine)
+    mid = _seed_asset(pg_engine, approved=True)
+    calls = {"n": 0}
+
+    def fail(_url):
+        calls["n"] += 1
+        raise RuntimeError("gone")
+
+    dl = MediaDownloader(sf, store=LocalMediaStore(tmp_path), decoder=FakeDecoder(_pattern()), fetch=fail)
+    for _ in range(3):
+        with Session(pg_engine) as s:
+            asset = s.get(MediaAsset, mid)
+            asset.next_retry_at = None       # make the next scheduled retry due now
+            s.commit()
+        assert dl.download_asset(mid).error == "gone"
+
+    with Session(pg_engine) as s:
+        asset = s.get(MediaAsset, mid)
+        assert asset.download_status == "failed" and asset.download_attempts == 3
+        assert asset.next_retry_at is None and asset.download_error == "gone"
+    assert dl.download_asset(mid).skipped and calls["n"] == 3
 
 
 @pytest.mark.pg

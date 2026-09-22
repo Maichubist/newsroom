@@ -29,6 +29,14 @@ def test_engagement_rate_weights_forwards_above_reactions():
     assert fwd_only > reacts_only        # forwards weighted higher (default 2x)
 
 
+def test_engagement_rate_uses_views_comments_and_post_age():
+    young = engagement_rate(MessageStats(views=100, comments=10), 1000, post_age_hours=0.5)
+    mature = engagement_rate(MessageStats(views=100, comments=10), 1000, post_age_hours=6)
+    no_comments = engagement_rate(MessageStats(views=100), 1000, post_age_hours=0.5)
+    assert young > mature
+    assert young > no_comments
+
+
 def test_engagement_rate_none_without_subscribers():
     assert engagement_rate(MessageStats(forwards=5), None) is None
     assert engagement_rate(MessageStats(forwards=5), 0) is None

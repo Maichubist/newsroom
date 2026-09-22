@@ -69,10 +69,14 @@ FloodWait перечікуємо.
 
 ## 4. Demand-score на тему
 
-`demand = w1·(нормалізована forwards-зважена залученість)
-        + w2·(швидкість поширення)
-        + w3·(широта — скільки НЕЗАЛЕЖНИХ каналів покрили тему)
-        − w4·(дисконт маніпуляції — координований сплеск/боти/ІПСО-маркери)`
+Поточний post-level сигнал:
+
+`engagement = 0.65·age_normalized(views/subscribers)
+            + 0.35·(reactions + 2·forwards + 1.5·comments)/views`
+
+Demand фасету — робастна медіана: спершу медіана постів кожного джерела, потім медіана
+між джерелами. Heat відділений від demand і рахує recency, burst проти 7-денного baseline
+та широту незалежних джерел. Деталі й межа facets/topic-path: `docs/facets.md`.
 
 Дисконт маніпуляції обов'язковий: залученість у політ/воєнних темах масово
 накручується; той самий сигнал ловить наш surge/ІПСО-детектор. Накручене ≠ попит.
@@ -99,19 +103,18 @@ FloodWait перечікуємо.
 
 ## 7. Компоненти коду
 
-Зараз (збір):
+Зараз (збір і аналітика):
 - `newsroom/analyze/demand.py`: `DemandSource` (Protocol; Telethon impl `# pragma`,
   fake у тестах), `record_item_metric`, `record_source_metric`,
   `select_items_to_measure` (нещодавні telegram-items), `engagement_rate` (чиста),
   `DemandCollector`. Прапорець `DEMAND_METRICS_ENABLED`, цикл `demand_forever` на
   спільному Telethon-клієнті.
-- Таблиці `item_metrics`, `source_metrics` (нові таблиці — `create_all` створює, без
-  ALTER).
-
-Пізніше (аналітика):
-- семантична кластеризація постів у теми + LLM-назва;
-- `demand_score` на тему з дисконтом маніпуляцій;
-- prior у курацію (співрівний) + щотижневий звіт нагляду.
+- Таблиці `item_metrics`, `source_metrics`; snapshots включають views, reactions,
+  forwards і доступну кількість Telegram discussion replies.
+- `newsroom/analyze/facets.py`: typed event facets, heat/demand на значеннях і
+  підтриманих міжвимірних парах, persistence та curation loader.
+- `FACETS_ENABLED` збирає/рахує новий шар; `FACET_CURATION_ENABLED` окремо вмикає його
+  як prior у курацію після shadow-калібрування.
 
 ## 8. Передумови для аналітики (не для збору)
 

@@ -116,6 +116,15 @@ class MediaAsset(Base):
 
     phash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # reused-image search
     storage_key: Mapped[str | None] = mapped_column(Text, nullable=True)  # set only after download (post-filter)
+    # Download lifecycle. Media bytes are fetched only for an editorially-approved
+    # publication; terminal states keep a dead/oversized asset from poisoning the
+    # oldest-first worker queue forever.
+    download_status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending", index=True)
+    download_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    download_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    downloaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set when the local file was deleted after publication (the bytes are sent to
     # Telegram by URL and never read locally again; the phash reuse-archive lives in
     # the DB). storage_key is kept so nothing re-downloads; purged_at means gone-locally.

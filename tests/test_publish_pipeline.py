@@ -208,7 +208,8 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
             it = Item(source_id=src.id, external_id=f"i{tag}", content_hash=f"h{tag}", title="t")
             s.add(it)
             s.flush()
-            s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200))
+            s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200,
+                             storage_key=f"ready/{tag}", download_status="ready"))
             from newsroom.models import Event, Publication
             ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
                        first_seen_at=dt.datetime.now(UTC))
@@ -229,15 +230,15 @@ def test_media_attached_only_after_reuse_and_vision_clean(pg_engine):
             s.commit()
             return pub.id
 
-    # reuse clean but no vision verdict -> text only
+    # reuse clean but no vision verdict -> wait; do not publish text first
     p1 = RecordingPoster()
-    _publisher(sf, p1).publish_one(_seed_with_media(reuse_ok=True, vision_ok=False))
-    assert p1.calls[0][0] == "sendMessage"
+    r1 = _publisher(sf, p1).publish_one(_seed_with_media(reuse_ok=True, vision_ok=False))
+    assert r1.skipped and r1.reasons == ["media_checking"] and p1.calls == []
 
-    # vision ok but reuse not checked -> text only
+    # vision ok but reuse not checked -> wait as well
     p2 = RecordingPoster()
-    _publisher(sf, p2).publish_one(_seed_with_media(reuse_ok=False, vision_ok=True))
-    assert p2.calls[0][0] == "sendMessage"
+    r2 = _publisher(sf, p2).publish_one(_seed_with_media(reuse_ok=False, vision_ok=True))
+    assert r2.skipped and r2.reasons == ["media_checking"] and p2.calls == []
 
     # both clean -> photo with caption
     p3 = RecordingPoster()
@@ -255,8 +256,10 @@ def _seed_two_image_event(pg_engine, *, tag):
         it = Item(source_id=src.id, external_id=f"al{tag}", content_hash=f"al{tag}".ljust(64, "0"), title="t")
         s.add(it)
         s.flush()
-        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/a.jpg", width=1200))
-        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/b.jpg", width=1000))
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/a.jpg", width=1200,
+                         storage_key=f"ready/{tag}/a", download_status="ready"))
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/b.jpg", width=1000,
+                         storage_key=f"ready/{tag}/b", download_status="ready"))
         ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
                    first_seen_at=dt.datetime.now(UTC))
         s.add(ev)
@@ -350,11 +353,11 @@ class FakeStore:
 
 def test_local_media_deleted_after_publish(pg_engine):
     from newsroom.db import make_session_factory
-    from newsroom.models import Event, EventItem, Item, MediaAsset, Publication, Source
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
 
     sf = make_session_factory(pg_engine)
     poster = RecordingPoster()
-    store = FakeStore()
+    store = FakeStore({"ab/abcd": b"photo"})
 
     with Session(pg_engine) as s:
         src = Source(kind="rss", handle_or_url="https://mm/purge", name="MM", origin="ua", tier="media")
@@ -365,14 +368,20 @@ def test_local_media_deleted_after_publish(pg_engine):
         s.flush()
         # a downloaded asset (storage_key set) and a not-yet-downloaded one (skipped)
         downloaded = MediaAsset(item_id=it.id, kind="image", url="http://x/p.jpg",
-                                width=1200, storage_key="ab/abcd", phash="p1")
-        pending = MediaAsset(item_id=it.id, kind="image", url="http://x/q.jpg", width=1200)
+                                width=1200, storage_key="ab/abcd", phash="p1",
+                                download_status="ready")
+        pending = MediaAsset(item_id=it.id, kind="image", url="http://x/q.jpg", width=1200,
+                             download_status="failed", download_error="exhausted")
         s.add_all([downloaded, pending])
         ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
                    first_seen_at=dt.datetime.now(UTC))
         s.add(ev)
         s.flush()
         s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                       decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                       decision="media_vision_ok"))
         pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
                           headline="Заголовок", body="Коротка новина.",
                           features={"critic_ok": True, "is_rumor": False})
@@ -501,7 +510,8 @@ def test_media_send_failure_falls_back_to_text(pg_engine):
         it = Item(source_id=src.id, external_id="fb1", content_hash="fb1".ljust(64, "0"), title="t")
         s.add(it)
         s.flush()
-        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/unfetchable.jpg", width=1200))
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/unfetchable.jpg", width=1200,
+                         storage_key="ready/unfetchable", download_status="ready"))
         ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
                    first_seen_at=dt.datetime.now(UTC))
         s.add(ev)
@@ -566,7 +576,7 @@ def test_telegram_media_falls_back_to_text_when_file_missing(pg_engine):
 
 def test_media_not_purged_when_no_store(pg_engine):
     from newsroom.db import make_session_factory
-    from newsroom.models import Event, EventItem, Item, MediaAsset, Publication, Source
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
 
     sf = make_session_factory(pg_engine)
     with Session(pg_engine) as s:
@@ -583,6 +593,10 @@ def test_media_not_purged_when_no_store(pg_engine):
         s.add(ev)
         s.flush()
         s.add(EventItem(event_id=ev.id, item_id=it.id, role="origin"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                       decision="media_clean"))
+        s.add(Decision(entity_type="event", entity_id=str(ev.id), stage="verify",
+                       decision="media_vision_ok"))
         pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
                           headline="Заголовок", body="Коротка новина.",
                           features={"critic_ok": True, "is_rumor": False})
@@ -614,7 +628,8 @@ def test_media_attaches_on_reuse_alone_when_vision_disabled(pg_engine):
                       content_hash=f"nv{vision_block}".ljust(64, "0"), title="t")
             s.add(it)
             s.flush()
-            s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200))
+            s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/pic.jpg", width=1200,
+                             storage_key=f"ready/{vision_block}", download_status="ready"))
             ev = Event(status="confirmed", risk_level="low", rubric="economy", title="e",
                        first_seen_at=dt.datetime.now(UTC))
             s.add(ev)
@@ -646,6 +661,97 @@ def test_media_attaches_on_reuse_alone_when_vision_disabled(pg_engine):
     p2 = RecordingPoster()
     _publisher_no_vision(p2).publish_one(_seed(vision_block=True))
     assert p2.calls[0][0] == "sendMessage"
+
+
+def test_publish_waits_until_every_media_asset_is_settled(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        src = Source(kind="telegram", handle_or_url="@wait", name="wait", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="wait1", content_hash="wait1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        ready = MediaAsset(item_id=it.id, kind="image", url="http://x/ready.jpg",
+                           source_ref="1", storage_key="ready/one", download_status="ready",
+                           width=1200)
+        pending = MediaAsset(item_id=it.id, kind="image", source_ref="2", download_status="pending",
+                             width=1200)
+        s.add_all([ready, pending])
+        ev = Event(status="confirmed", title="wait", first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id))
+        s.add_all([
+            Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"),
+            Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"),
+        ])
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="h", body="Коротка новина.", features={"critic_ok": True})
+        s.add(pub)
+        s.flush()
+        pid, pending_id = pub.id, pending.id
+        s.commit()
+
+    poster = RecordingPoster()
+    publisher = _publisher(sf, poster)
+    first = publisher.publish_one(pid)
+    assert first.skipped and first.reasons == ["media_pending"] and poster.calls == []
+    with Session(pg_engine) as s:
+        pub = s.get(Publication, pid)
+        assert pub.media_approved_at is not None
+        assert pub.has_media and pub.media_status == "pending"
+        assert (pub.media_expected_count, pub.media_ready_count, pub.media_failed_count) == (2, 1, 0)
+        asset = s.get(MediaAsset, pending_id)
+        asset.download_status = "failed"
+        asset.download_error = "message deleted"
+        s.commit()
+
+    second = publisher.publish_one(pid)
+    assert second.published and poster.calls[0][0] == "sendPhoto"
+    with Session(pg_engine) as s:
+        pub = s.get(Publication, pid)
+        assert pub.media_status == "ready" and pub.media_failed_count == 1
+
+
+def test_long_approved_post_keeps_full_text_and_media(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Decision, Event, EventItem, Item, MediaAsset, Publication, Source
+
+    sf = make_session_factory(pg_engine)
+    body = "Д" * 1500
+    with Session(pg_engine) as s:
+        src = Source(kind="rss", handle_or_url="https://long", name="long", origin="ua", tier="media")
+        s.add(src)
+        s.flush()
+        it = Item(source_id=src.id, external_id="long1", content_hash="long1".ljust(64, "0"), title="t")
+        s.add(it)
+        s.flush()
+        s.add(MediaAsset(item_id=it.id, kind="image", url="http://x/long.jpg", width=1200,
+                         storage_key="ready/long", download_status="ready"))
+        ev = Event(status="confirmed", title="long", first_seen_at=dt.datetime.now(UTC))
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=it.id))
+        s.add_all([
+            Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_clean"),
+            Decision(entity_type="event", entity_id=str(ev.id), stage="verify", decision="media_vision_ok"),
+        ])
+        pub = Publication(event_id=ev.id, channel="telegram", kind="post", status="draft",
+                          headline="h", body=body, features={"critic_ok": True})
+        s.add(pub)
+        s.flush()
+        pid = pub.id
+        s.commit()
+
+    poster = RecordingPoster()
+    assert _publisher(sf, poster).publish_one(pid).published
+    assert [method for method, _ in poster.calls] == ["sendMessage", "sendPhoto"]
+    assert poster.calls[0][1]["text"] == body
+    assert poster.calls[1][1]["reply_to_message_id"] == 501
 
 
 def test_publish_skips_blocked_top_draft(pg_engine):

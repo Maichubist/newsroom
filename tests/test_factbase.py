@@ -198,3 +198,83 @@ def test_build_event_merges_across_sources_and_stores(pg_engine):
     assert builder.build_event(event_id).skipped
     # build_pending also skips it now
     assert build_pending(sf, builder, limit=50)["events"] == 0
+
+
+@pytest.mark.pg
+def test_single_source_reuses_classifier_facts_without_llm_or_embeddings(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, EventItem, Item, Source
+
+    class MustNotExtract:
+        model = "must-not-run"
+
+        def extract(self, *args):
+            raise AssertionError("single-source compact facts must bypass extractor")
+
+    class MustNotEmbed:
+        model = "must-not-run"
+
+        def embed(self, text):
+            raise AssertionError("single-source compact facts must bypass embeddings")
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        source = Source(kind="rss", handle_or_url="https://single/feed", name="Single",
+                        origin="ua", tier="media")
+        s.add(source)
+        s.flush()
+        item = Item(source_id=source.id, external_id="one", content_hash="one", title="Новина",
+                    text="Уряд заявив про 10 об'єктів.")
+        s.add(item)
+        s.flush()
+        event = Event(
+            status="reported", title="Новина", first_seen_at=dt.datetime.now(dt.timezone.utc),
+            compact_facts=[{"text": "Уряд заявив про 10 об'єктів", "modality": "statement",
+                            "attribution": "уряд", "number": 10, "unit": "об'єкт"}],
+        )
+        s.add(event)
+        s.flush()
+        s.add(EventItem(event_id=event.id, item_id=item.id))
+        event_id = event.id
+        s.commit()
+
+    result = FactBaseBuilder(sf, extractor=MustNotExtract(), embedder=MustNotEmbed()).build_event(event_id)
+    assert result.facts == 1 and result.sources == 1
+    with Session(pg_engine) as s:
+        base = s.get(Event, event_id).fact_base
+        assert base["origin"] == "classifier_compact"
+        assert base["facts"][0]["modality"] == "statement"
+        assert base["facts"][0]["attribution"] == "уряд"
+        assert base["facts"][0]["values"] == [10.0]
+
+
+@pytest.mark.pg
+def test_build_pending_can_wait_for_curation_shortlist(pg_engine):
+    from newsroom.db import make_session_factory
+    from newsroom.models import Event, EventItem, Item, Source
+
+    sf = make_session_factory(pg_engine)
+    with Session(pg_engine) as s:
+        source = Source(kind="rss", handle_or_url="https://shortlist/feed", name="S",
+                        origin="ua", tier="media")
+        s.add(source)
+        s.flush()
+        item = Item(source_id=source.id, external_id="short", content_hash="short",
+                    title="Подія", text="Факт")
+        s.add(item)
+        s.flush()
+        event = Event(status="confirmed", title="Подія",
+                      first_seen_at=dt.datetime.now(dt.timezone.utc),
+                      compact_facts=[{"text": "Факт", "modality": "fact"}])
+        s.add(event)
+        s.flush()
+        s.add(EventItem(event_id=event.id, item_id=item.id))
+        event_id = event.id
+        s.commit()
+
+    builder = FactBaseBuilder(sf, extractor=FakeFactExtractor(), embedder=AxisEmbedder())
+    assert build_pending(sf, builder, require_curation=True)["events"] == 0
+    with Session(pg_engine) as s:
+        s.get(Event, event_id).curated = "publish"
+        s.commit()
+    assert build_pending(sf, builder, require_curation=True)["events"] == 1

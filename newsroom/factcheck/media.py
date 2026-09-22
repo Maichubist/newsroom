@@ -121,29 +121,48 @@ class MediaChecker:
                 select(EventItem.item_id).where(EventItem.event_id == event_id)
             ).scalars().all())
             assets = list(s.execute(
-                select(MediaAsset.id, MediaAsset.item_id, MediaAsset.phash, MediaAsset.first_seen_at)
-                .where(MediaAsset.item_id.in_(own_item_ids), MediaAsset.phash.is_not(None))
+                select(MediaAsset.id, MediaAsset.item_id, MediaAsset.kind,
+                       MediaAsset.phash, MediaAsset.first_seen_at)
+                .where(MediaAsset.item_id.in_(own_item_ids),
+                       MediaAsset.storage_key.is_not(None),
+                       MediaAsset.purged_at.is_(None),
+                       MediaAsset.download_status == "ready")
             ).all()) if own_item_ids else []
 
         checked = 0
         flags: list[dict] = []
-        for media_id, item_id, phash, first_seen_at in assets:
-            checked += 1
-            matches = find_reused_media(
-                self.sf, phash, max_distance=self.max_distance,
-                exclude_item_ids=own_item_ids, before=first_seen_at,
-            )
+        asset_verdicts: list[tuple[int, str, dict]] = []
+        for media_id, item_id, kind, phash, first_seen_at in assets:
+            matches = []
+            if kind == "image" and phash:
+                checked += 1
+                matches = find_reused_media(
+                    self.sf, phash, max_distance=self.max_distance,
+                    exclude_item_ids=own_item_ids, before=first_seen_at,
+                )
             if matches:
-                flags.append({"media_id": media_id, "item_id": item_id,
-                              "matches": [{"media_id": m.media_id, "item_id": m.item_id,
-                                           "distance": m.distance} for m in matches[:5]]})
+                detail = {"media_id": media_id, "item_id": item_id,
+                          "matches": [{"media_id": m.media_id, "item_id": m.item_id,
+                                       "distance": m.distance} for m in matches[:5]]}
+                flags.append(detail)
+                asset_verdicts.append((media_id, "media_reuse", detail))
+            else:
+                asset_verdicts.append((media_id, "media_clean", {"kind": kind}))
 
         with self.sf() as s:
+            for media_id, verdict, details in asset_verdicts:
+                s.add(Decision(
+                    entity_type="media_asset", entity_id=str(media_id), stage="verify",
+                    decision=verdict, reason=None, details=details,
+                    charter_version=self.charter_version,
+                ))
+            clean_count = sum(1 for _mid, verdict, _details in asset_verdicts
+                              if verdict == "media_clean")
             s.add(Decision(
                 entity_type="event", entity_id=str(event_id), stage="verify",
-                decision="media_reuse" if flags else "media_clean",
+                decision="media_reuse" if flags and clean_count == 0 else "media_clean",
                 reason=f"{len(flags)} reused of {checked} checked" if checked else "no media with phash",
-                details={"checked": checked, "flags": flags},
+                details={"checked": checked, "clean": clean_count, "flags": flags},
                 charter_version=self.charter_version,
             ))
             s.commit()
@@ -152,11 +171,10 @@ class MediaChecker:
 
 
 def check_media_pending(session_factory, checker: "MediaChecker", *, limit: int = 25) -> dict[str, int]:
-    """One media-check tick: check publishable events that own hashed media and
-    have not been checked. Text-only events are ignored (nothing to hash), so
-    this stays dormant until media is downloaded (stage 1г)."""
+    """Check approved events only after every media download has settled."""
     from sqlalchemy import Integer, cast, or_, select
 
+    from newsroom.media.state import approved_event_ids_query, event_media_readiness
     from newsroom.models import Decision, Event, EventItem, Item, MediaAsset
 
     with session_factory() as s:
@@ -172,13 +190,18 @@ def check_media_pending(session_factory, checker: "MediaChecker", *, limit: int 
             .join(MediaAsset, MediaAsset.item_id == Item.id)
             .where(
                 Event.status.in_(("reported", "confirmed", "rumor")),
+                Event.id.in_(approved_event_ids_query()),
                 # image with a phash (reuse-checkable) OR a video: video has no phash but
-                # must still get a media_clean verdict so a video-only post can attach it
-                or_(MediaAsset.phash.is_not(None), MediaAsset.kind == "video"),
+                # must still get a media_clean verdict, but only after bytes exist.
+                or_(MediaAsset.phash.is_not(None),
+                    (MediaAsset.kind == "video") & MediaAsset.storage_key.is_not(None)),
                 Event.id.not_in(checked),
             )
-            .order_by(Event.id).distinct().limit(limit)
+            .order_by(Event.id).distinct().limit(max(limit * 4, limit))
         ).scalars().all())
+
+        ids = [event_id for event_id in ids
+               if event_media_readiness(s, event_id).downloads_settled][:limit]
 
     stats = {"events": 0, "reused": 0}
     for event_id in ids:

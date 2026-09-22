@@ -265,6 +265,7 @@ def classify_signals(sig: CandidateSignals, config: PredupConfig) -> str:
 @dataclass(frozen=True)
 class TwinPair:
     """The structured context handed to the arbiter: incoming event vs one candidate."""
+    incoming_event_id: int = 0
     incoming_title: str = ""
     incoming_texts: tuple[str, ...] = ()
     incoming_facts: tuple[str, ...] = ()
@@ -378,7 +379,10 @@ class LLMTwinJudge:  # pragma: no cover - network
 
             return chat_json(self._ensure_client(), model=self.model,
                              messages=[{"role": "user", "content": content}],
-                             op="twin", max_tokens=256)
+                             op="twin", max_tokens=256,
+                             event_id=pair.incoming_event_id or None,
+                             related_event_id=pair.candidate_event_id or None,
+                             context={"stage": "dedup_pair"})
         except Exception as exc:  # noqa: BLE001
             log.warning("twin judge call failed", extra={"error": str(exc)})
             return None
@@ -406,6 +410,7 @@ class TwinVerdict:
     reason: str = ""
     model: str | None = None
     signals: dict = field(default_factory=dict)
+    pair_checks: tuple[dict, ...] = ()
 
 
 def _utc_now() -> dt.datetime:
@@ -541,30 +546,43 @@ class PrepublishDedup:
             incoming, candidates = find_publish_candidates(s, event_id, config=self.config)
             if incoming is None or not candidates:
                 return TwinVerdict()
+            checks: list[dict] = []
 
             # deterministic auto-duplicate on an exact signal — no LLM
             for csig, sig, _pub in candidates:
                 if classify_signals(sig, self.config) == CLASS_AUTO_DUPLICATE:
+                    checks.append({"candidate_event_id": csig.event_id, "decision": ACTION_DUPLICATE,
+                                   "mode": "auto", "confidence": 1.0,
+                                   "reason": "exact content_hash", **sig.as_details()})
                     return TwinVerdict(action=ACTION_DUPLICATE, mode="auto",
                                        canonical_event_id=csig.event_id,
                                        reason="exact content_hash",
-                                       signals=sig.as_details())
+                                       signals=sig.as_details(), pair_checks=tuple(checks))
 
             if self.judge is None:                    # no arbiter: stay conservative, don't guess
-                return TwinVerdict()
+                checks.extend({"candidate_event_id": csig.event_id, "decision": "unjudged",
+                               "mode": "unavailable", **sig.as_details()}
+                              for csig, sig, _pub in candidates)
+                return TwinVerdict(reason="dedup_judge_unavailable", pair_checks=tuple(checks))
 
             # grey zone: ask the arbiter, nearest candidate first, stop on a duplicate/update
             for csig, sig, is_pub in candidates:
                 pair = self._build_pair(s, incoming, csig, is_pub)
                 judgment = self.judge.judge(pair)
+                checks.append({"candidate_event_id": csig.event_id,
+                               "decision": judgment.decision, "mode": "llm",
+                               "confidence": judgment.confidence, "reason": judgment.reason,
+                               "candidate_published": is_pub, **sig.as_details()})
                 if judgment.decision == ACTION_SEPARATE:
                     continue
                 return TwinVerdict(
                     action=judgment.decision, mode="llm",
                     canonical_event_id=csig.event_id,
                     confidence=judgment.confidence, reason=judgment.reason,
-                    model=getattr(self.judge, "model", None), signals=sig.as_details())
-        return TwinVerdict()
+                    model=getattr(self.judge, "model", None), signals=sig.as_details(),
+                    pair_checks=tuple(checks))
+        return TwinVerdict(mode="llm", reason="all_candidates_separate",
+                           model=getattr(self.judge, "model", None), pair_checks=tuple(checks))
 
     def _build_pair(self, s, incoming: EventSig, candidate: EventSig, is_published: bool) -> TwinPair:
         from sqlalchemy import select
@@ -579,14 +597,15 @@ class PrepublishDedup:
             .where(EventItem.event_id == incoming.event_id).limit(2)
         ).scalars().all())
         return TwinPair(
+            incoming_event_id=incoming.event_id,
             incoming_title=(inc_ev.title if inc_ev else "") or "",
             incoming_texts=tuple(t for t in inc_texts if t),
-            incoming_facts=tuple(_facts(inc_ev.fact_base if inc_ev else None)),
+            incoming_facts=tuple(_event_facts(inc_ev)),
             incoming_sources=int(inc_ev.independent_source_count or 0) if inc_ev else 0,
             candidate_event_id=candidate.event_id,
             candidate_title=(cand_ev.title if cand_ev else "") or "",
             candidate_summary=(cand_story.current_summary if cand_story else "") or "",
-            candidate_facts=tuple(_facts(cand_ev.fact_base if cand_ev else None)),
+            candidate_facts=tuple(_event_facts(cand_ev)),
             candidate_published=is_published,
         )
 
@@ -597,3 +616,10 @@ def _facts(fact_base, *, limit: int = 5) -> list[str]:
     rows = [f for f in (fact_base.get("facts") or []) if isinstance(f, dict) and f.get("text")]
     rows.sort(key=lambda f: int(f.get("confirmed_by") or 0), reverse=True)
     return [str(f["text"]).strip() for f in rows[:limit]]
+
+
+def _event_facts(event, *, limit: int = 5) -> list[str]:
+    if event is None:
+        return []
+    return (_facts(event.fact_base, limit=limit)
+            or _facts({"facts": list(event.compact_facts or [])}, limit=limit))

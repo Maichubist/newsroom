@@ -42,6 +42,13 @@ class Decision(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     details: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # analyst-friendly promoted fields (also mirrored in details): a numeric signal behind the
+    # decision (ranker popularity demand×heat, dedup confidence/cosine, source count…) and the
+    # related entity (dedup candidate/canonical event, linked story) — so the trace table can
+    # sort/join without digging into JSONB. Nullable: a stage sets them only when meaningful.
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ref_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     charter_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -63,6 +70,8 @@ class LlmCall(Base):
     cached_tokens: Mapped[int] = mapped_column(Integer, default=0)       # prompt-cache hits (discounted)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)          # computed from model pricing
     event_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)  # correlate cost to an event
+    related_event_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     request_text: Mapped[str | None] = mapped_column(Text, nullable=True)   # input, capped (the essence)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # output, capped

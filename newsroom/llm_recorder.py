@@ -26,6 +26,8 @@ def make_db_recorder(session_factory, *, max_text: int = MAX_LOG_TEXT) -> Callab
                 cached_tokens=int(rec.cached_tokens or 0),
                 cost_usd=float(rec.cost_usd or 0.0),
                 event_id=rec.event_id,
+                related_event_id=rec.related_event_id,
+                context=rec.context,
                 duration_ms=rec.duration_ms,
                 request_text=((rec.request_text or "")[:max_text] or None),
                 response_text=((rec.response_text or "")[:max_text] or None),
@@ -54,6 +56,9 @@ def summarize_cost(session_factory, *, days: int = 7) -> dict:
         calls, cost, toks = s.execute(select(
             func.count(LlmCall.id), func.coalesce(func.sum(LlmCall.cost_usd), 0.0),
             func.coalesce(func.sum(tokens), 0)).where(where)).one()
+        attributed_calls, attributed_cost = s.execute(select(
+            func.count(LlmCall.id), func.coalesce(func.sum(LlmCall.cost_usd), 0.0)
+        ).where(where, LlmCall.event_id.is_not(None))).one()
         by_op = s.execute(select(
             LlmCall.op, func.count(LlmCall.id), func.coalesce(func.sum(LlmCall.cost_usd), 0.0),
             func.coalesce(func.sum(tokens), 0)).where(where)
@@ -66,6 +71,7 @@ def summarize_cost(session_factory, *, days: int = 7) -> dict:
             .where(where).group_by(day).order_by(day.desc())).all()
     return {
         "days": days, "calls": int(calls), "cost": float(cost), "tokens": int(toks),
+        "attributed_calls": int(attributed_calls), "attributed_cost": float(attributed_cost),
         "by_op": [(o, int(c), float(x), int(t)) for o, c, x, t in by_op],
         "by_model": [(m, int(c), float(x)) for m, c, x in by_model],
         "by_day": [(d.date().isoformat() if d else "?", float(x), int(c)) for d, x, c in by_day],

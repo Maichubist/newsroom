@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterator
 
 from newsroom.logsetup import bind
 
@@ -50,6 +52,129 @@ PRICES: dict[str, dict[str, float]] = {
 }
 
 
+def _object(properties: dict, required: list[str] | None = None) -> dict:
+    return {"type": "object", "properties": properties,
+            "required": required or list(properties), "additionalProperties": False}
+
+
+def _nullable(schema: dict) -> dict:
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+_TEXT = {"type": "string"}
+_NUMBER_OR_NULL = _nullable({"type": "number"})
+_TEXT_OR_NULL = _nullable(_TEXT)
+
+# One strict contract per production operation. Parsers remain as a defensive boundary
+# for provider fallbacks and historical/local-model compatibility, but OpenAI calls no
+# longer spend a retry merely because the JSON shape drifted.
+JSON_SCHEMAS: dict[str, dict] = {
+    "classify": _object({
+        "is_event": {"type": "boolean"},
+        "rubrics": {"type": "array", "items": _TEXT},
+        "side": {"type": "string", "enum": ["ua", "ru", "unknown"]},
+        "is_first_source": {"type": "boolean"},
+        "is_rumor": {"type": "boolean"},
+        "keywords": {"type": "array", "items": _TEXT},
+        "facts": {"type": "array", "items": _object({
+            "text": _TEXT,
+            "modality": {"type": "string", "enum": ["fact", "statement", "forecast"]},
+            "attribution": _TEXT_OR_NULL,
+            "time_frame": _TEXT_OR_NULL,
+            "number": _NUMBER_OR_NULL,
+            "unit": _TEXT_OR_NULL,
+        })},
+        "topic_path": {"type": "array", "items": _TEXT},
+        "facets": {"type": "array", "items": _object({
+            "dimension": {"type": "string", "enum": [
+                "event_type", "geography", "actor", "target", "entity", "sector",
+                "impact", "means", "audience_scope", "story",
+            ]},
+            "path": {"type": "array", "items": _TEXT},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence": _TEXT,
+        })},
+    }),
+    "factbase": _object({
+        "facts": {"type": "array", "items": _object({
+            "text": _TEXT,
+            "kind": {"type": "string", "enum": ["fact", "claim", "reaction", "frame"]},
+            "number": _NUMBER_OR_NULL,
+            "unit": _TEXT_OR_NULL,
+            "modality": {"type": "string", "enum": ["fact", "statement", "forecast"]},
+            "attribution": _TEXT_OR_NULL,
+            "time_frame": _TEXT_OR_NULL,
+        })},
+    }),
+    "factcheck_claims": _object({
+        "claims": {"type": "array", "items": _object({
+            "text": _TEXT,
+            "claim_type": {"type": "string", "enum": [
+                "who", "what", "where", "when", "number", "quote", "cause",
+            ]},
+        })},
+    }),
+    "factcheck_verdict": _object({
+        "verdict": {"type": "string", "enum": ["true", "false", "misleading", "unverifiable"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "explanation": _TEXT,
+        "stances": {"type": "array", "items": {
+            "type": "string", "enum": ["supports", "refutes", "neutral"]}},
+    }),
+    "story_update": _object({
+        "update_type": {"type": "string", "enum": [
+            "new_fact", "confirmation", "refutation", "reaction", "consequence", "minor"]},
+        "significant": {"type": "boolean"},
+        "position_changed": {"type": "boolean"},
+        "summary": _TEXT,
+    }),
+    "twin": _object({
+        "decision": {"type": "string", "enum": ["duplicate", "update", "separate"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "reason": _TEXT,
+    }),
+    "generate": _object({
+        "headline": _TEXT, "body": _TEXT, "watching": _TEXT,
+        "rubrics": {"type": "array", "items": _TEXT},
+    }),
+    "curate": _object({
+        "decisions": {"type": "array", "items": _object({
+            "id": {"type": "integer"},
+            "decision": {"type": "string", "enum": ["publish", "hold"]},
+        })},
+    }),
+    "dedup": _object({
+        "groups": {"type": "array", "items": {
+            "type": "array", "items": {"type": "integer"}}},
+    }),
+    "taxonomy_merge": _object({
+        "groups": {"type": "array", "items": {
+            "type": "array", "items": {"type": "integer"}}},
+    }),
+    "moderate_image": _object({
+        "blocked": {"type": "boolean"},
+        "labels": {"type": "array", "items": _TEXT},
+        "reason": _TEXT,
+    }),
+}
+
+
+def response_format_for(op: str) -> dict:
+    schema = JSON_SCHEMAS.get(op)
+    if schema is None:
+        return {"type": "json_object"}
+    return {"type": "json_schema", "json_schema": {
+        "name": f"newsroom_{op}", "strict": True, "schema": schema,
+    }}
+
+
+def _format_not_supported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return ("response_format" in message or "json_schema" in message) and any(
+        marker in message for marker in ("unsupported", "not support", "invalid", "unknown")
+    )
+
+
 def cost_for(model: str, prompt_tokens: int = 0, completion_tokens: int = 0,
              cached_tokens: int = 0) -> float:
     """USD cost of one call. prompt_tokens INCLUDES cached_tokens (OpenAI convention), so
@@ -76,6 +201,8 @@ class UsageRecord:
     cached_tokens: int = 0
     cost_usd: float = 0.0
     event_id: int | None = None
+    related_event_id: int | None = None
+    context: dict | None = None
     duration_ms: int | None = None
     request_text: str | None = None
     response_text: str | None = None
@@ -83,6 +210,33 @@ class UsageRecord:
 
 # Pluggable sink (set at startup to the DB recorder). None = record nowhere (tests, tools).
 _recorder: Callable[[UsageRecord], None] | None = None
+_call_context: ContextVar[dict] = ContextVar("newsroom_llm_call_context", default={})
+
+
+@contextmanager
+def llm_context(*, event_id: int | None = None, related_event_id: int | None = None,
+                **details) -> Iterator[None]:
+    """Attach business context to every nested LLM/embedding call.
+
+    Keeping this at the orchestration boundary avoids changing every pluggable
+    classifier/extractor interface merely for telemetry. Nested scopes inherit and
+    override keys, and ContextVar keeps concurrent asyncio tasks isolated.
+    """
+    merged = dict(_call_context.get())
+    if event_id is not None:
+        merged["event_id"] = int(event_id)
+    if related_event_id is not None:
+        merged["related_event_id"] = int(related_event_id)
+    merged.update({k: v for k, v in details.items() if v is not None})
+    token = _call_context.set(merged)
+    try:
+        yield
+    finally:
+        _call_context.reset(token)
+
+
+def current_llm_context() -> dict:
+    return dict(_call_context.get())
 
 
 def set_usage_recorder(fn: Callable[[UsageRecord], None] | None) -> None:
@@ -120,7 +274,17 @@ def messages_text(messages, *, cap: int = MAX_LOG_TEXT) -> str:
             parts.append(f"{role}: {content}" if role else content)
         else:
             parts.append(str(m))
-    return "\n".join(parts)[:cap]
+    value = "\n".join(parts)
+    if len(value) <= cap:
+        return value
+    # Prompts put instructions first and the actual news/pair at the end. Keeping only
+    # the prefix made the telemetry useless for production evals, so retain both ends.
+    marker = "\n…[truncated]…\n"
+    if cap <= len(marker):
+        return value[:cap]
+    head = max(0, (cap - len(marker)) // 2)
+    tail = max(0, cap - len(marker) - head)
+    return value[:head] + marker + (value[-tail:] if tail else "")
 
 
 def log_usage(op: str, model: str, resp, *, event_id: int | None = None) -> None:
@@ -137,35 +301,53 @@ def log_usage(op: str, model: str, resp, *, event_id: int | None = None) -> None
 
 
 def record_completion(op: str, model: str, resp, *, messages, event_id: int | None = None,
+                      related_event_id: int | None = None, context: dict | None = None,
                       duration_ms: int | None = None, content: str | None = None) -> None:
     """Build a UsageRecord for a chat completion and hand it to the recorder."""
     usage = getattr(resp, "usage", None)
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
     completion = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
     cached = int(_cached_tokens(usage) or 0) if usage else 0
+    inherited = current_llm_context()
+    resolved_event_id = event_id if event_id is not None else inherited.pop("event_id", None)
+    resolved_related_id = (related_event_id if related_event_id is not None
+                           else inherited.pop("related_event_id", None))
+    merged_context = {**inherited, **(context or {})}
     record_usage(UsageRecord(
         op=op, model=model, prompt_tokens=prompt, completion_tokens=completion,
         cached_tokens=cached, cost_usd=cost_for(model, prompt, completion, cached),
-        event_id=event_id, duration_ms=duration_ms,
+        event_id=resolved_event_id, related_event_id=resolved_related_id,
+        context=merged_context or None, duration_ms=duration_ms,
         request_text=messages_text(messages), response_text=(content or "")[:MAX_LOG_TEXT] or None))
 
 
 def chat_json(client, *, model: str, messages: list, op: str, max_tokens: int,
-              temperature: float = 0.0, event_id: int | None = None) -> str | None:
+              temperature: float = 0.0, event_id: int | None = None,
+              related_event_id: int | None = None, context: dict | None = None) -> str | None:
     """Call chat.completions with a JSON response format, a hard output cap, usage logging
     and cost recording. Returns the message content (str) or None. Raises on API error so
     the caller's existing try/except handles it (retry / conservative fallback)."""
     t0 = time.monotonic()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        response_format={"type": "json_object"},
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    kwargs = dict(model=model, messages=messages, response_format=response_format_for(op),
+                  temperature=temperature, max_tokens=max_tokens)
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        # Local/OpenAI-compatible endpoints may implement JSON mode but not schemas.
+        # Fall back only for an explicit capability error; network/rate/auth errors
+        # still propagate to the caller's normal retry policy.
+        if kwargs["response_format"]["type"] != "json_schema" or not _format_not_supported(exc):
+            raise
+        log.warning("structured output unsupported; falling back to JSON mode",
+                    extra=bind(op=op, model=model))
+        kwargs["response_format"] = {"type": "json_object"}
+        resp = client.chat.completions.create(**kwargs)
     duration_ms = int((time.monotonic() - t0) * 1000)
-    log_usage(op, model, resp, event_id=event_id)
+    inherited = current_llm_context()
+    resolved_event_id = event_id if event_id is not None else inherited.get("event_id")
+    log_usage(op, model, resp, event_id=resolved_event_id)
     content = resp.choices[0].message.content
     record_completion(op, model, resp, messages=messages, event_id=event_id,
+                      related_event_id=related_event_id, context=context,
                       duration_ms=duration_ms, content=content)
     return content

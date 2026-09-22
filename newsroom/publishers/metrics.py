@@ -1,6 +1,6 @@
 """Publication and channel metrics (architecture §5.3, §10).
 
-After a post goes out we track how it does — views, reactions, forwards — and the
+After a post goes out we track how it does — views, reactions, forwards, comments — and the
 channel's subscriber count over time, to feed ranking and reputation later. These
 numbers come from the Telethon reading account (the Bot API cannot read channel
 message views/reactions), so the stats source is pluggable: a real Telethon source
@@ -25,9 +25,11 @@ class MessageStats:
     views: int | None = None
     reactions: dict | None = None      # {emoji: count}
     forwards: int | None = None
+    comments: int | None = None
 
     def is_empty(self) -> bool:
-        return self.views is None and self.forwards is None and not self.reactions
+        return (self.views is None and self.forwards is None and self.comments is None
+                and not self.reactions)
 
 
 class MetricsSource(Protocol):
@@ -45,6 +47,7 @@ def record_publication_metric(session, publication_id: int, stats: MessageStats)
         views=stats.views,
         reactions=stats.reactions,
         forwards=stats.forwards,
+        comments=stats.comments,
     )
     session.add(row)
     session.flush()
@@ -157,9 +160,11 @@ class TelethonMetricsSource:  # pragma: no cover - network / MTProto
             for r in msg.reactions.results:
                 emoticon = getattr(getattr(r, "reaction", None), "emoticon", None) or "?"
                 reactions[emoticon] = getattr(r, "count", 0)
+        replies = getattr(getattr(msg, "replies", None), "replies", None)
         return MessageStats(views=getattr(msg, "views", None),
                             reactions=reactions or None,
-                            forwards=getattr(msg, "forwards", None))
+                            forwards=getattr(msg, "forwards", None),
+                            comments=replies)
 
     def channel_subscribers(self, channel: str) -> int | None:
         from telethon.tl.functions.channels import GetFullChannelRequest

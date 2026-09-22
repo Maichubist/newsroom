@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from newsroom.llmutil import (
     UsageRecord,
     cost_for,
+    llm_context,
     messages_text,
     record_completion,
     record_usage,
@@ -47,7 +48,10 @@ def test_cost_for_unknown_model_is_zero():
 def test_messages_text_flattens_and_caps():
     msgs = [{"role": "system", "content": "ти редактор"}, {"role": "user", "content": "текст"}]
     assert messages_text(msgs) == "system: ти редактор\nuser: текст"
-    assert len(messages_text([{"role": "user", "content": "x" * 9999}], cap=100)) == 100
+    capped = messages_text([{"role": "user", "content": "HEAD" + "x" * 9999 + "TAIL"}], cap=100)
+    assert len(capped) == 100
+    assert capped.startswith("user: HEAD") and capped.endswith("TAIL")
+    assert messages_text([{"role": "user", "content": "abcdef"}], cap=3) == "use"
 
 
 # --- recorder plumbing (offline) ----------------------------------------------
@@ -88,6 +92,22 @@ def test_record_completion_builds_record_from_response():
     assert "рангуй" in r.request_text and r.response_text == '{"ok": true}'
 
 
+def test_record_completion_inherits_business_context():
+    seen: list[UsageRecord] = []
+    set_usage_recorder(seen.append)
+    resp = types.SimpleNamespace(usage=_usage_for_context())
+    with llm_context(event_id=17, related_event_id=9, source_id=4, stage="twin"):
+        record_completion("twin", "gpt-4o-mini", resp,
+                          messages=[{"role": "user", "content": "pair"}])
+    assert seen[0].event_id == 17 and seen[0].related_event_id == 9
+    assert seen[0].context == {"source_id": 4, "stage": "twin"}
+
+
+def _usage_for_context():
+    return types.SimpleNamespace(prompt_tokens=10, completion_tokens=2,
+                                 prompt_tokens_details=types.SimpleNamespace(cached_tokens=0))
+
+
 # --- DB recorder + summary (pg) -----------------------------------------------
 
 @pytest.mark.pg
@@ -99,12 +119,14 @@ def test_db_recorder_inserts_a_row(pg_engine):
     sf = make_session_factory(pg_engine)
     rec = make_db_recorder(sf, max_text=20)
     rec(UsageRecord(op="factbase", model="gpt-4o-mini", prompt_tokens=1200, completion_tokens=300,
-                    cached_tokens=100, cost_usd=0.00042, event_id=5, duration_ms=88,
+                    cached_tokens=100, cost_usd=0.00042, event_id=5, related_event_id=3,
+                    context={"source_id": 8}, duration_ms=88,
                     request_text="x" * 100, response_text="y" * 100))
     with Session(pg_engine) as s:
         row = s.query(LlmCall).one()
         assert row.op == "factbase" and row.prompt_tokens == 1200 and row.completion_tokens == 300
         assert row.cost_usd == pytest.approx(0.00042) and row.event_id == 5
+        assert row.related_event_id == 3 and row.context == {"source_id": 8}
         assert len(row.request_text) == 20 and len(row.response_text) == 20   # capped
 
 
@@ -130,6 +152,7 @@ def test_summarize_cost_aggregates_by_op_and_model(pg_engine):
     out = summarize_cost(sf, days=7)
     assert out["calls"] == 3 and out["cost"] == pytest.approx(0.031)
     assert out["tokens"] == 100 + 10 + 200 + 20 + 500
+    assert out["attributed_calls"] == 0 and out["attributed_cost"] == 0.0
     by_op = dict((o, (n, c)) for o, n, c, _t in out["by_op"])
     assert by_op["classify"] == (2, pytest.approx(0.03))
     assert out["by_op"][0][0] == "classify"          # ordered by cost desc

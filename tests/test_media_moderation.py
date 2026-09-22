@@ -79,8 +79,8 @@ class FakeModerator:
         return ImageVerdict(blocked=False)
 
 
-def _event_with_images(pg_engine, urls, *, status="confirmed"):
-    from newsroom.models import Event, EventItem, Item, MediaAsset, Source
+def _event_with_images(pg_engine, urls, *, status="confirmed", approved=False):
+    from newsroom.models import Event, EventItem, Item, MediaAsset, Publication, Source
 
     with Session(pg_engine) as s:
         src = Source(kind="rss", handle_or_url=f"https://v/{urls}", name="V", origin="ua", tier="media")
@@ -93,8 +93,16 @@ def _event_with_images(pg_engine, urls, *, status="confirmed"):
             it = Item(source_id=src.id, external_id=f"{urls}-{i}", content_hash=f"{urls}-{i}", title="t")
             s.add(it)
             s.flush()
-            s.add(MediaAsset(item_id=it.id, kind="image", url=url))
+            s.add(MediaAsset(item_id=it.id, kind="image", url=url,
+                             storage_key=f"stored/{i}" if approved else None,
+                             download_status="ready" if approved else "pending"))
             s.add(EventItem(event_id=ev.id, item_id=it.id))
+        if approved:
+            s.add(Publication(
+                event_id=ev.id, channel="telegram", kind="post", status="draft",
+                headline="h", body="b", features={"critic_ok": True},
+                media_approved_at=dt.datetime.now(UTC),
+            ))
         s.commit()
         return ev.id
 
@@ -147,8 +155,8 @@ def test_moderate_pending_selects_events_with_images(pg_engine):
     from newsroom.db import make_session_factory
 
     sf = make_session_factory(pg_engine)
-    _event_with_images(pg_engine, ["http://x/a.jpg"])
-    _event_with_images(pg_engine, ["http://x/b.jpg"], status="signal")   # not publishable
+    _event_with_images(pg_engine, ["http://x/a.jpg"], approved=True)
+    _event_with_images(pg_engine, ["http://x/b.jpg"], status="signal", approved=True)   # not publishable
     stats = moderate_pending(sf, FakeModerator(), limit=50)
     assert stats["events"] == 1
 

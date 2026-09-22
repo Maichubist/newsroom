@@ -40,6 +40,10 @@ def main() -> int:
 
     print(f"LLM spend, last {days} day(s)")
     print(f"  total: ${s['cost']:.4f}   calls: {s['calls']}   tokens: {s['tokens']:,}")
+    call_share = (100.0 * s["attributed_calls"] / s["calls"]) if s["calls"] else 0.0
+    cost_share = (100.0 * s["attributed_cost"] / s["cost"]) if s["cost"] else 0.0
+    print(f"  attributed to event: {s['attributed_calls']}/{s['calls']} calls "
+          f"({call_share:.1f}%), ${s['attributed_cost']:.4f} ({cost_share:.1f}% of spend)")
 
     print("\nby op:")
     print(f"  {'op':16} {'calls':>7} {'cost $':>12} {'tokens':>12}")

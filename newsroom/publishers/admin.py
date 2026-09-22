@@ -180,10 +180,17 @@ def report_publications(session_factory, *, limit: int = 10) -> str:
 
 
 def report_topics(session_factory, *, limit: int = 25) -> str:
+    from newsroom.analyze.facets import load_top_facets
     from newsroom.analyze.taxonomy import load_top_nodes
 
     with session_factory() as s:
+        facets = load_top_facets(s, limit=limit)
         nodes = load_top_nodes(s, limit=limit)
+    if facets:
+        rows = [[f["dimension"], f["label"], f"{f['heat']:.2f}", f"{f['demand']:.2f}"]
+                for f in facets]
+        return _pre("Фасети зараз (окремо heat і demand)\n\n"
+                    + _table(["вимір", "значення", "heat", "demand"], rows))
     if not nodes:
         return ("Гарячих тем ще нема (потрібні події з topic_path і метрики конкурентів; "
                 "TOPICS_ENABLED + класифікатор + збір метрик).")

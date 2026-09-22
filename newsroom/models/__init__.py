@@ -17,7 +17,11 @@ from newsroom.models.analytical import (
     Claim,
     ClaimEvidence,
     Event,
+    EventFacet,
     EventItem,
+    FacetDimension,
+    FacetPairMetric,
+    FacetValue,
     Story,
     StoryVersion,
     TaxonomyNode,
@@ -44,6 +48,7 @@ __all__ = [
     "Source", "Item", "ItemVersion", "MediaAsset", "ItemEmbedding", "Entity", "ItemEntity",
     # analytical
     "Event", "EventItem", "Story", "StoryVersion", "Claim", "ClaimEvidence", "TaxonomyNode",
+    "FacetDimension", "FacetValue", "EventFacet", "FacetPairMetric",
     # publication
     "Publication", "PublicationMetric", "ChannelMetric", "ItemMetric", "SourceMetric",
     "PUBLICATION_STATUSES", "is_valid_publication_status",

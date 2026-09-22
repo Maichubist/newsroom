@@ -67,10 +67,16 @@ def extract_media(msg) -> list[RawMedia]:
         out.append(RawMedia(kind="image", url=None, source_ref=ref))
     video = getattr(msg, "video", None)
     doc = getattr(msg, "document", None)
+    mime = str(getattr(doc, "mime_type", "") or "").lower() if doc is not None else ""
     if video is not None:
         out.append(RawMedia(kind="video", url=None, size_bytes=getattr(video, "size", None), source_ref=ref))
-    elif doc is not None and str(getattr(doc, "mime_type", "") or "").startswith("video"):
+    elif doc is not None and mime.startswith("video/"):
         out.append(RawMedia(kind="video", url=None, size_bytes=getattr(doc, "size", None), source_ref=ref))
+    # News channels often send a full-resolution JPEG/PNG "as a file". Telethon
+    # exposes that as Document rather than Message.photo, but download_media(msg)
+    # still fetches it normally.
+    elif doc is not None and mime.startswith("image/"):
+        out.append(RawMedia(kind="image", url=None, size_bytes=getattr(doc, "size", None), source_ref=ref))
     return out
 
 

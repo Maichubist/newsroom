@@ -114,6 +114,15 @@ class MergeVerdict:
     reason: str = ""
     model: str | None = None
     signals: dict = field(default_factory=dict)
+    pair_checks: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True)
+class DedupOneResult:
+    event_id: int
+    verdict: MergeVerdict
+    merged: bool = False
+    items_moved: int = 0
 
 
 def _utc_now() -> dt.datetime:
@@ -197,27 +206,39 @@ class IngestDedup:
             incoming, candidates = find_merge_candidates(s, event_id, config=self.config)
             if incoming is None or not candidates:
                 return MergeVerdict()
+            checks: list[dict] = []
 
             for csig, sig in candidates:
                 if classify_signals(sig, self.config) == CLASS_AUTO_DUPLICATE:
+                    checks.append({"candidate_event_id": csig.event_id,
+                                   "decision": MERGE_DUPLICATE, "mode": "auto",
+                                   "confidence": 1.0, "reason": "exact content_hash",
+                                   **sig.as_details()})
                     return MergeVerdict(action=MERGE_DUPLICATE, mode="auto",
                                         canonical_event_id=csig.event_id,
                                         reason="exact content_hash",
-                                        signals=sig.as_details())
+                                        signals=sig.as_details(), pair_checks=tuple(checks))
 
             if self.judge is None:
+                checks.extend({"candidate_event_id": csig.event_id, "decision": "unjudged",
+                               "mode": "unavailable", **sig.as_details()}
+                              for csig, sig in candidates)
                 return MergeVerdict(action=MERGE_UNRESOLVED, mode="unavailable",
-                                    reason="dedup_judge_unavailable")
+                                    reason="dedup_judge_unavailable", pair_checks=tuple(checks))
 
             for csig, sig in candidates:
                 pair = self._build_pair(s, incoming, csig)
                 judgment = self.judge.judge(pair)
+                checks.append({"candidate_event_id": csig.event_id,
+                               "decision": judgment.decision, "mode": "llm",
+                               "confidence": judgment.confidence, "reason": judgment.reason,
+                               **sig.as_details()})
                 if judgment.decision == ACTION_HOLD_REVIEW:
                     return MergeVerdict(action=MERGE_UNRESOLVED, mode="llm",
                                         canonical_event_id=csig.event_id,
                                         confidence=judgment.confidence, reason=judgment.reason,
                                         model=getattr(self.judge, "model", None),
-                                        signals=sig.as_details())
+                                        signals=sig.as_details(), pair_checks=tuple(checks))
                 # only a straight duplicate merges; update/separate stay distinct events
                 # (story-linking relates an update, it must not be swallowed here)
                 if judgment.decision != ACTION_DUPLICATE:
@@ -226,8 +247,9 @@ class IngestDedup:
                                     canonical_event_id=csig.event_id,
                                     confidence=judgment.confidence, reason=judgment.reason,
                                     model=getattr(self.judge, "model", None),
-                                    signals=sig.as_details())
-        return MergeVerdict()
+                                    signals=sig.as_details(), pair_checks=tuple(checks))
+        return MergeVerdict(reason="all_candidates_separate",
+                            model=getattr(self.judge, "model", None), pair_checks=tuple(checks))
 
     def _build_pair(self, s, incoming: EventSig, candidate: EventSig) -> TwinPair:
         from sqlalchemy import select
@@ -241,13 +263,14 @@ class IngestDedup:
             .where(EventItem.event_id == incoming.event_id).limit(2)
         ).scalars().all())
         return TwinPair(
+            incoming_event_id=incoming.event_id,
             incoming_title=(inc_ev.title if inc_ev else "") or "",
             incoming_texts=tuple(t for t in inc_texts if t),
-            incoming_facts=tuple(_facts(inc_ev.fact_base if inc_ev else None)),
+            incoming_facts=tuple(_event_facts(inc_ev)),
             incoming_sources=int(inc_ev.independent_source_count or 0) if inc_ev else 0,
             candidate_event_id=candidate.event_id,
             candidate_title=(cand_ev.title if cand_ev else "") or "",
-            candidate_facts=tuple(_facts(cand_ev.fact_base if cand_ev else None)),
+            candidate_facts=tuple(_event_facts(cand_ev)),
             candidate_published=False,
         )
 
@@ -319,7 +342,110 @@ def _refresh_merged_event_evidence(session, event) -> None:
         event.status = gate.status
 
 
+# --- official-first canonical choice (docs: official-first sourcing) -------------------
+# tier → "officialness" rank (lower = more authoritative); is_official also ⇒ 0.
+_TIER_RANK = {"official": 0, "media": 1, "aggregator": 2, "leak": 3, "anonymous": 4}
+_DEFAULT_TIER_RANK = 5
+
+
+def _tier_rank(tier: str | None, is_official: bool = False) -> int:
+    if is_official:
+        return 0
+    return _TIER_RANK.get((tier or "").strip().lower(), _DEFAULT_TIER_RANK)
+
+
+def event_tier_rank(session, event_id: int) -> int:
+    """Most-official rank among an event's sources (lower = more official). An event
+    inherits its best source's rank, so an official-sourced event outranks an aggregator
+    one. Source-less/unknown events get the least-official rank (they never win a tie)."""
+    from sqlalchemy import select
+
+    from newsroom.models import EventItem, Item, Source
+
+    rows = session.execute(
+        select(Source.tier, Source.is_official)
+        .join(Item, Item.source_id == Source.id)
+        .join(EventItem, EventItem.item_id == Item.id)
+        .where(EventItem.event_id == event_id)
+    ).all()
+    if not rows:
+        return _DEFAULT_TIER_RANK
+    return min(_tier_rank(tier, bool(is_official)) for tier, is_official in rows)
+
+
+def choose_canonical(incoming_id: int, incoming_rank: int,
+                     candidate_id: int, candidate_rank: int) -> tuple[int, int]:
+    """(keep, drop) for a confirmed duplicate pair: keep the MORE-official event; on a tie
+    keep the earlier one. `candidate` is always earlier than `incoming`
+    (find_merge_candidates guarantees candidate_id < incoming_id), so the earlier event wins
+    every tie — official-first only ever FLIPS the canonical to a later, more-official one."""
+    if incoming_rank < candidate_rank:
+        return incoming_id, candidate_id          # later event is more official → it is canonical
+    return candidate_id, incoming_id              # earlier canonical wins ties and when >= official
+
+
+def dedup_one_event(session_factory, dedup: "IngestDedup", event_id: int, *,
+                    enforce: bool = False, canonical_by_tier: bool = False,
+                    charter_version: str = "0.3") -> DedupOneResult:
+    """Resolve and journal one newly-created event before its first classifier call.
+
+    The returned event_id is the surviving canonical event when an enforced duplicate
+    merge occurred; otherwise it is the original event. This is also used by the
+    background sweep, keeping online and catch-up semantics identical.
+    """
+    from newsroom.models import Decision
+
+    try:
+        verdict = dedup.check(event_id)
+    except Exception as exc:  # noqa: BLE001 — telemetry + later stages must survive one bad pair
+        log.warning("ingest dedup check failed", extra={"event_id": event_id, "error": str(exc)})
+        verdict = MergeVerdict(action=MERGE_UNRESOLVED, mode="error", reason=str(exc)[:200])
+
+    details = {
+        "action": verdict.action, "mode": verdict.mode, "enforced": enforce,
+        "candidate_event_id": verdict.canonical_event_id,
+        "confidence": verdict.confidence, **(verdict.signals or {}),
+    }
+    keep = drop = None
+    moved = 0
+    with session_factory() as s:
+        for pair in verdict.pair_checks:
+            candidate_id = pair.get("candidate_event_id")
+            s.add(Decision(
+                entity_type="event", entity_id=str(event_id), stage="ingest_dedup_pair",
+                decision=f"pair_{pair.get('decision', 'unknown')}",
+                reason=(str(pair.get("reason"))[:300] if pair.get("reason") else None),
+                details={**pair, "enforced": enforce}, score=pair.get("confidence"),
+                ref_id=candidate_id, model=verdict.model, charter_version=charter_version,
+            ))
+        if verdict.action == MERGE_DUPLICATE and verdict.canonical_event_id is not None:
+            keep, drop = verdict.canonical_event_id, event_id
+            tier_keep, tier_drop = choose_canonical(
+                event_id, event_tier_rank(s, event_id),
+                verdict.canonical_event_id, event_tier_rank(s, verdict.canonical_event_id))
+            details["keep_by_tier"] = tier_keep
+            details["tier_flip"] = tier_keep != keep
+            if canonical_by_tier:
+                keep, drop = tier_keep, tier_drop
+        s.add(Decision(
+            entity_type="event", entity_id=str(event_id), stage="ingest_dedup",
+            decision=f"ingest_{verdict.action}", reason=verdict.reason or None,
+            details=details, model=verdict.model, charter_version=charter_version,
+            score=verdict.confidence, ref_id=verdict.canonical_event_id,
+        ))
+        if enforce and keep is not None:
+            moved = merge_events(s, keep=keep, drop=drop)
+        s.commit()
+    return DedupOneResult(
+        event_id=(keep if enforce and keep is not None else event_id),
+        verdict=verdict,
+        merged=bool(enforce and keep is not None),
+        items_moved=moved,
+    )
+
+
 def dedup_new_events(session_factory, dedup: "IngestDedup", *, enforce: bool = False,
+                     canonical_by_tier: bool = False,
                      limit: int = 40, charter_version: str = "0.3",
                      max_unresolved_attempts: int = DEFAULT_MAX_UNRESOLVED_ATTEMPTS) -> dict[str, int]:
     """One ingest-dedup tick: check recent events for an earlier twin and (when enforcing)
@@ -362,34 +488,19 @@ def dedup_new_events(session_factory, dedup: "IngestDedup", *, enforce: bool = F
             ).order_by(Event.id).limit(limit)
         ).scalars().all())
 
-    stats = {"checked": 0, "merged": 0, "items_moved": 0, "unresolved": 0}
+    stats = {"checked": 0, "pairs": 0, "merged": 0, "items_moved": 0, "unresolved": 0}
     for event_id in ids:
-        try:
-            verdict = dedup.check(event_id)
-        except Exception as exc:  # noqa: BLE001 — one bad event must not abort the whole tick
-            log.warning("ingest dedup check failed", extra={"event_id": event_id, "error": str(exc)})
-            verdict = MergeVerdict(action=MERGE_UNRESOLVED, mode="error", reason=str(exc)[:200])
+        result = dedup_one_event(
+            session_factory, dedup, event_id, enforce=enforce,
+            canonical_by_tier=canonical_by_tier, charter_version=charter_version)
+        verdict = result.verdict
         stats["checked"] += 1
+        stats["pairs"] += len(verdict.pair_checks)
         if verdict.action == MERGE_UNRESOLVED:
             stats["unresolved"] += 1
-        details = {
-            "action": verdict.action, "mode": verdict.mode, "enforced": enforce,
-            "candidate_event_id": verdict.canonical_event_id,
-            "confidence": verdict.confidence, **(verdict.signals or {}),
-        }
-        with session_factory() as s:
-            s.add(Decision(
-                entity_type="event", entity_id=str(event_id), stage="ingest_dedup",
-                decision=f"ingest_{verdict.action}", reason=verdict.reason or None,
-                details=details, model=verdict.model, charter_version=charter_version,
-            ))
-            if enforce and verdict.action == MERGE_DUPLICATE and verdict.canonical_event_id is not None:
-                # the candidate is always earlier (find_merge_candidates: id < event_id),
-                # so it is the keep and the current event is folded into it
-                moved = merge_events(s, keep=verdict.canonical_event_id, drop=event_id)
-                stats["merged"] += 1
-                stats["items_moved"] += moved
-            s.commit()
+        if result.merged:
+            stats["merged"] += 1
+            stats["items_moved"] += result.items_moved
     return stats
 
 
@@ -399,3 +510,10 @@ def _facts(fact_base, *, limit: int = 5) -> list[str]:
     rows = [f for f in (fact_base.get("facts") or []) if isinstance(f, dict) and f.get("text")]
     rows.sort(key=lambda f: int(f.get("confirmed_by") or 0), reverse=True)
     return [str(f["text"]).strip() for f in rows[:limit]]
+
+
+def _event_facts(event, *, limit: int = 5) -> list[str]:
+    if event is None:
+        return []
+    return (_facts(event.fact_base, limit=limit)
+            or _facts({"facts": list(event.compact_facts or [])}, limit=limit))

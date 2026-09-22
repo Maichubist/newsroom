@@ -84,6 +84,14 @@ def media_moderation_enabled() -> bool:
     return os.getenv("MEDIA_MODERATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def media_pipeline_tick_seconds() -> float:
+    """Short DB polling is cheap now that only approved drafts can enter the queue."""
+    try:
+        return max(1.0, float(os.getenv("MEDIA_PIPELINE_TICK_SECONDS", "10")))
+    except (TypeError, ValueError):
+        return 10.0
+
+
 def reputation_enabled() -> bool:
     return os.getenv("REPUTATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -94,6 +102,14 @@ def monitoring_enabled() -> bool:
 
 def demand_metrics_enabled() -> bool:
     return os.getenv("DEMAND_METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def facets_enabled() -> bool:
+    return os.getenv("FACETS_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def facet_curation_enabled() -> bool:
+    return os.getenv("FACET_CURATION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def telegram_autosync_subs_enabled() -> bool:
@@ -130,6 +146,13 @@ def ingest_dedup_enabled() -> bool:
 
 def ingest_dedup_enforce() -> bool:
     return os.getenv("INGEST_DEDUP_ENFORCE", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def ingest_canonical_by_tier() -> bool:
+    """Official-first: when a duplicate is merged, keep the more-official event as canonical
+    (not just the earlier one). Observe mode logs the tier choice regardless; this flag gates
+    APPLYING it. Off by default (docs/official-first sourcing)."""
+    return os.getenv("INGEST_CANONICAL_BY_TIER", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def _utc_now() -> dt.datetime:
@@ -187,6 +210,7 @@ def build_verifier_from_env(session_factory):  # pragma: no cover — needs Open
     from newsroom.analyze.stoplist import load_stoplist
     from newsroom.analyze.verify import Verifier
 
+    early_dedup = build_ingest_dedup_from_env(session_factory) if ingest_dedup_enabled() else None
     return Verifier(
         session_factory,
         classifier=LLMClassifier(),
@@ -195,6 +219,10 @@ def build_verifier_from_env(session_factory):  # pragma: no cover — needs Open
         filters=load_filters(CONFIG_DIR / "filters.yaml"),
         stoplist_rules=load_stoplist(CONFIG_DIR / "stoplist.yaml"),
         spine=load_spine(CONFIG_DIR / "taxonomy_spine.yaml"),
+        facets_enabled=facets_enabled(),
+        ingest_dedup=early_dedup,
+        ingest_dedup_enforce=ingest_dedup_enforce(),
+        ingest_canonical_by_tier=ingest_canonical_by_tier(),
     )
 
 
@@ -223,6 +251,7 @@ def build_factbase_builder_from_env(session_factory):  # pragma: no cover — ne
 
 async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30.0,
                            require_dedup_settled: bool = False,
+                           require_curation: bool = False,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Build the shared fact base for publishable events until stopped. Runs before
     fact-check and editorial so both work from one viewpoint. When require_dedup_settled,
@@ -232,7 +261,8 @@ async def factbase_forever(session_factory, builder, *, tick_seconds: float = 30
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(build_pending, session_factory, builder,
-                                            require_dedup_settled=require_dedup_settled)
+                                            require_dedup_settled=require_dedup_settled,
+                                            require_curation=require_curation)
             if stats.get("events"):
                 log.info("factbase tick", extra=bind(**stats))
         except Exception:
@@ -398,6 +428,7 @@ def build_ingest_dedup_from_env(session_factory):  # pragma: no cover — needs 
 
 
 async def ingest_dedup_forever(session_factory, dedup, *, enforce: bool = False,
+                               canonical_by_tier: bool = False,
                                tick_seconds: float = 60.0,
                                stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Merge duplicate events EARLY (Phase B) — right after clustering, before the fact
@@ -407,7 +438,8 @@ async def ingest_dedup_forever(session_factory, dedup, *, enforce: bool = False,
 
     while not (stop and stop.is_set()):
         try:
-            stats = await asyncio.to_thread(dedup_new_events, session_factory, dedup, enforce=enforce)
+            stats = await asyncio.to_thread(dedup_new_events, session_factory, dedup,
+                                            enforce=enforce, canonical_by_tier=canonical_by_tier)
             if stats.get("merged") or stats.get("checked"):
                 log.info("ingest dedup tick", extra=bind(**stats))
         except Exception:
@@ -425,6 +457,7 @@ def build_editorial_ranker_from_env():  # pragma: no cover — needs OpenAI
 async def curation_forever(session_factory, ranker, *, grouper=None, digest_config=None,
                            window_hours: int = 6, tick_seconds: float = 120.0,
                            require_dedup_settled: bool = False, dedup_every: int = 15,
+                           use_facets: bool = False,
                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Mark recent events publish/hold (must-publish deterministically,
     the rest by comparative LLM ranking), before editorial. Only publish-marked
@@ -451,7 +484,7 @@ async def curation_forever(session_factory, ranker, *, grouper=None, digest_conf
                     log.info("dedup tick", extra=bind(**dstats))
             stats = await asyncio.to_thread(
                 curate_pending, session_factory, ranker, window_hours=window_hours,
-                require_dedup_settled=require_dedup_settled)
+                require_dedup_settled=require_dedup_settled, use_facets=use_facets)
             if stats.get("curated"):
                 log.info("curation tick", extra=bind(**stats))
         except Exception:
@@ -479,8 +512,9 @@ async def digest_forever(session_factory, publisher, *, tick_seconds: float = 30
 
 
 async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 30.0,
-                            require_curation: bool = False,
-                            stop: asyncio.Event | None = None) -> None:  # pragma: no cover
+                             require_curation: bool = False,
+                             require_factbase: bool = False,
+                             stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Draft posts for publishable events until stopped. With require_curation, only
     events the curation marked publish are drafted. Nothing is published."""
     from newsroom.editorial import produce_drafts
@@ -489,7 +523,7 @@ async def editorial_forever(session_factory, pipeline, *, tick_seconds: float = 
         try:
             stats = await asyncio.to_thread(
                 produce_drafts, session_factory, pipeline,
-                require_curation=require_curation)
+                require_curation=require_curation, require_factbase=require_factbase)
             if stats.get("produced"):
                 log.info("editorial tick", extra=bind(**stats))
         except Exception:
@@ -546,6 +580,7 @@ def build_publisher_from_env(session_factory):
         media_store=media_store,
         purge_media_after_publish=purge,
         require_vision=media_moderation_enabled(),
+        require_media_check=media_check_enabled(),
         predup=predup,
         predup_enforce=prepublish_dedup_enforce(),
         spine=spine,
@@ -607,7 +642,7 @@ async def ogimage_forever(session_factory, resolver, *, tick_seconds: float = 45
 
 async def media_download_forever(session_factory, downloader, *, tick_seconds: float = 45.0,
                                  stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Download media for filter-passed items and compute pHashes, feeding the
+    """Download media for finally-approved drafts and compute pHashes, feeding the
     reuse check. Nothing is published."""
     while not (stop and stop.is_set()):
         try:
@@ -654,7 +689,7 @@ def build_tg_media_downloader_from_env(session_factory):  # pragma: no cover —
 
 async def tg_media_download_forever(session_factory, collector, downloader, *, tick_seconds: float = 45.0,
                                     stop: asyncio.Event | None = None) -> None:  # pragma: no cover
-    """Download url-less Telegram media for filter-passed items via the collector's
+    """Download url-less Telegram media for finally-approved drafts via the collector's
     shared Telethon session, then store + pHash it like HTTP media. Runs on the main
     loop (Telethon calls stay on their client's loop). Nothing is published."""
     client = await collector.wait_client()
@@ -777,12 +812,15 @@ async def demand_forever(session_factory, collector, *, tick_seconds: float = 18
     while not (stop and stop.is_set()):
         try:
             stats = await asyncio.to_thread(demand.collect_items)
-            if ticks % sources_every == 0:
-                await asyncio.to_thread(demand.collect_sources)
             if ticks % analytics_every == 0:
                 by_rubric = await asyncio.to_thread(refresh_demand, session_factory)
                 if by_rubric:
                     log.info("demand index", extra=bind(rubrics=len(by_rubric)))
+            # Subscriber refresh touches every channel and can be slow. Run analytics first
+            # from the last good snapshot so a long source sweep cannot keep the persisted
+            # demand index absent indefinitely.
+            if ticks % sources_every == 0:
+                await asyncio.to_thread(demand.collect_sources)
             if stats.get("recorded"):
                 log.info("demand tick", extra=bind(**stats))
         except Exception:
@@ -792,6 +830,7 @@ async def demand_forever(session_factory, collector, *, tick_seconds: float = 18
 
 
 async def topics_forever(session_factory, *, tick_seconds: float = 1800.0,
+                         with_facets: bool = False,
                          stop: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Recompute the taxonomy-pyramid engagement heat from competitor engagement, so
     curation and the admin console read what topics are hot now (charter v0.3 §3.2). DB-only,
@@ -803,6 +842,12 @@ async def topics_forever(session_factory, *, tick_seconds: float = 1800.0,
             heat = await asyncio.to_thread(refresh_taxonomy_heat, session_factory)
             if heat.get("nodes"):
                 log.info("taxonomy heat", extra=bind(nodes=heat["nodes"]))
+            if with_facets:
+                from newsroom.analyze.facets import refresh_facet_metrics
+
+                fstats = await asyncio.to_thread(refresh_facet_metrics, session_factory)
+                if fstats.get("values"):
+                    log.info("facet metrics", extra=bind(**fstats))
         except Exception:
             log.exception("taxonomy heat tick failed")
         await asyncio.sleep(tick_seconds)
@@ -896,9 +941,13 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         sync_sources(s, load_sources(CONFIG_PATH))
         s.commit()
 
-    tasks = [asyncio.create_task(poll_rss_forever(session_factory))]
+    media_tick = media_pipeline_tick_seconds()
+    tasks: list = []
     telegram_collector = None
     if telegram_enabled():
+        # Telegram FIRST: official accounts are our primary, first-mover feed (docs:
+        # official-first sourcing). The TG collector connects and starts realtime +
+        # backfill before RSS begins polling, so the official feed leads at startup.
         telegram_collector = TelegramCollector(session_factory)
         tasks.append(asyncio.create_task(telegram_collector.start()))
         log.info("telegram collection enabled")
@@ -910,6 +959,9 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
             log.info("telegram subscription auto-sync disabled (TELEGRAM_AUTOSYNC_SUBS off)")
     else:
         log.info("telegram collection disabled (COLLECTOR_TELEGRAM_ENABLED off)")
+
+    # RSS AFTER Telegram (media/aggregators follow the official feed).
+    tasks.append(asyncio.create_task(poll_rss_forever(session_factory)))
 
     if verify_enabled():
         verifier = build_verifier_from_env(session_factory)
@@ -929,20 +981,24 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
 
     if media_ogimage_enabled():
         resolver = build_ogimage_resolver_from_env(session_factory)
-        tasks.append(asyncio.create_task(ogimage_forever(session_factory, resolver)))
+        tasks.append(asyncio.create_task(
+            ogimage_forever(session_factory, resolver, tick_seconds=media_tick)))
         log.info("og:image resolution enabled")
     else:
         log.info("og:image resolution disabled (MEDIA_OGIMAGE_ENABLED off)")
 
     if media_download_enabled():
         downloader = build_media_downloader_from_env(session_factory)
-        tasks.append(asyncio.create_task(media_download_forever(session_factory, downloader)))
+        tasks.append(asyncio.create_task(
+            media_download_forever(session_factory, downloader, tick_seconds=media_tick)))
         log.info("media download enabled")
         # Telegram media has no URL — fetch it via the collector's Telethon session.
         if telegram_collector is not None:
             tg_downloader = build_tg_media_downloader_from_env(session_factory)
             tasks.append(asyncio.create_task(
-                tg_media_download_forever(session_factory, telegram_collector, tg_downloader)))
+                tg_media_download_forever(
+                    session_factory, telegram_collector, tg_downloader,
+                    tick_seconds=media_tick)))
             log.info("telegram media download enabled")
         # Sweep stale local media (most collected media never publishes, so post-publish
         # purge alone lets the store grow forever). Gated by the same purge flag.
@@ -961,7 +1017,8 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if factbase_enabled():
         builder = build_factbase_builder_from_env(session_factory)
         tasks.append(asyncio.create_task(factbase_forever(
-            session_factory, builder, require_dedup_settled=dedup_gate)))
+            session_factory, builder, require_dedup_settled=dedup_gate,
+            require_curation=curation_enabled())))
         log.info("fact base enabled")
     else:
         log.info("fact base disabled (FACTBASE_ENABLED off)")
@@ -977,7 +1034,8 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("fact-checking disabled (FACTCHECK_ENABLED off)")
 
     if media_check_enabled():
-        tasks.append(asyncio.create_task(media_check_forever(session_factory)))
+        tasks.append(asyncio.create_task(
+            media_check_forever(session_factory, tick_seconds=media_tick)))
         log.info("media check enabled")
     else:
         log.info("media check disabled (MEDIA_CHECK_ENABLED off)")
@@ -988,7 +1046,9 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         moderator = build_image_moderator_from_env()
         mod_store = LocalMediaStore(os.getenv("MEDIA_STORE_DIR", "./media"))
         tasks.append(asyncio.create_task(
-            media_moderation_forever(session_factory, moderator, store=mod_store)))
+            media_moderation_forever(
+                session_factory, moderator, store=mod_store,
+                tick_seconds=media_tick)))
         log.info("media moderation enabled")
     else:
         log.info("media moderation disabled (MEDIA_MODERATION_ENABLED off)")
@@ -1013,8 +1073,10 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
     if ingest_dedup_enabled():
         ingest_dedup = build_ingest_dedup_from_env(session_factory)
         tasks.append(asyncio.create_task(
-            ingest_dedup_forever(session_factory, ingest_dedup, enforce=ingest_dedup_enforce())))
-        log.info("ingest dedup enabled", extra=bind(enforce=ingest_dedup_enforce()))
+            ingest_dedup_forever(session_factory, ingest_dedup, enforce=ingest_dedup_enforce(),
+                                 canonical_by_tier=ingest_canonical_by_tier())))
+        log.info("ingest dedup enabled", extra=bind(enforce=ingest_dedup_enforce(),
+                                                    canonical_by_tier=ingest_canonical_by_tier()))
     else:
         log.info("ingest dedup disabled (INGEST_DEDUP_ENABLED off)")
 
@@ -1039,7 +1101,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         ranker = build_editorial_ranker_from_env()
         tasks.append(asyncio.create_task(curation_forever(
             session_factory, ranker, grouper=grouper, digest_config=curation_digest_config,
-            require_dedup_settled=dedup_gate)))
+            require_dedup_settled=dedup_gate, use_facets=facet_curation_enabled())))
         log.info("editorial curation enabled", extra=bind(digest_reserve=curation_digest_config is not None))
     else:
         if grouper is not None:            # curation off: dedup still needs a loop
@@ -1050,7 +1112,7 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         pipeline = build_editorial_pipeline_from_env(session_factory)
         tasks.append(asyncio.create_task(editorial_forever(
             session_factory, pipeline,
-            require_curation=curation_enabled())))
+            require_curation=curation_enabled(), require_factbase=factbase_enabled())))
         log.info("editorial drafting enabled", extra=bind(require_curation=curation_enabled()))
     else:
         log.info("editorial drafting disabled (EDITORIAL_ENABLED off)")
@@ -1128,8 +1190,9 @@ async def run_service() -> None:  # pragma: no cover — process entrypoint
         log.info("demand metrics disabled (DEMAND_METRICS_ENABLED off)")
 
     if topics_enabled():
-        tasks.append(asyncio.create_task(topics_forever(session_factory)))
-        log.info("hot topics enabled")
+        tasks.append(asyncio.create_task(topics_forever(
+            session_factory, with_facets=facets_enabled())))
+        log.info("hot topics enabled", extra=bind(facets=facets_enabled()))
     else:
         log.info("hot topics disabled (TOPICS_ENABLED off)")
 

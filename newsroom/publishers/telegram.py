@@ -59,6 +59,7 @@ class PublishResult:
     ok: bool
     message_id: int | None = None
     error: str | None = None
+    media_sent: bool = False
 
 
 def _int_or_none(value: str | None) -> int | None:
@@ -167,7 +168,8 @@ class TelegramPublisher:
             err = resp.get("description") or resp.get("error") or str(resp)
             log.warning("telegram media publish failed", extra={"error": err})
             return PublishResult(False, error=str(err))
-        return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id"))
+        return PublishResult(True, message_id=(resp.get("result") or {}).get("message_id"),
+                             media_sent=True)
 
     def send_media_group(self, choices, caption: str, *, chat_id: int | None = None,
                          reply_to_message_id: int | None = None,
@@ -213,7 +215,7 @@ class TelegramPublisher:
             return PublishResult(False, error=str(err))
         result = resp.get("result") or []
         first_id = result[0].get("message_id") if result else None
-        return PublishResult(True, message_id=first_id)
+        return PublishResult(True, message_id=first_id, media_sent=True)
 
     def send_post(self, body: str, media_choice=None, *, chat_id: int | None = None,
                   reply_to_message_id: int | None = None,

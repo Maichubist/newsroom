@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import datetime as dt
 from sqlalchemy.orm import Session
 
 from newsroom.media.download import persist_media_bytes
@@ -40,7 +41,7 @@ def _item(s, source_id, ext, *, status="clustered"):
 
 def test_select_pending_tg_media_filters(pg_engine):
     from newsroom.db import make_session_factory
-    from newsroom.models import MediaAsset, Source
+    from newsroom.models import Event, EventItem, MediaAsset, Publication, Source
 
     sf = make_session_factory(pg_engine)
     with Session(pg_engine) as s:
@@ -63,6 +64,15 @@ def test_select_pending_tg_media_filters(pg_engine):
         withurl = MediaAsset(item_id=rss_item, kind="image", url="http://x/a.jpg")
         s.add_all([good, stored, noref, onnew, withurl])
         s.flush()
+        ev = Event(status="confirmed", title="approved")
+        s.add(ev)
+        s.flush()
+        s.add(EventItem(event_id=ev.id, item_id=good_item))
+        s.add(Publication(
+            event_id=ev.id, channel="telegram", kind="post", status="draft",
+            headline="h", body="b", features={"critic_ok": True},
+            media_approved_at=dt.datetime.now(dt.timezone.utc),
+        ))
         good_id = good.id
         s.commit()
 

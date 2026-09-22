@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from newsroom.factbase.builder import (
     DEFAULT_FACT_THRESHOLD,
     FactExtractor,
+    MergedFact,
     VectorFact,
     fact_base_json,
     merge_facts,
@@ -49,6 +50,7 @@ class FactBaseBuilder:
             event = s.get(Event, event_id)
             if event is None or event.fact_base:
                 return FactBaseResult(event_id, skipped=True)
+            compact_facts = list(event.compact_facts or [])
             rows = list(s.execute(
                 select(Item.source_id, Source.name, Item.title, Item.text)
                 .join(Source, Source.id == Item.source_id)
@@ -64,17 +66,36 @@ class FactBaseBuilder:
         if not per_source:
             return FactBaseResult(event_id, skipped=True)
 
+        # The classifier already read the only source and emitted a small,
+        # modality-safe fact list. Reusing it avoids a second extraction call and
+        # one embedding per fact. Multi-source events still take the rich path below
+        # to calculate corroboration and numerical divergence across viewpoints.
+        if len(per_source) == 1 and compact_facts:
+            source_id = next(iter(per_source))
+            merged = _merged_from_compact(compact_facts, source_id)
+            base = fact_base_json(merged, [])
+            base["origin"] = "classifier_compact"
+            with self.sf() as s:
+                event = s.get(Event, event_id)
+                if event is not None:
+                    event.fact_base = base
+                    s.commit()
+            return FactBaseResult(event_id, facts=len(merged), sources=1, reactions=0)
+
         vector_facts: list[VectorFact] = []
         reactions: list[tuple[int, object]] = []
         for source_id, (name, texts) in per_source.items():
-            facts = self.extractor.extract(name, None, "\n".join(texts))[: self.max_facts_per_source]
-            for fact in facts:
-                if fact.kind == "reaction":
-                    reactions.append((source_id, fact))
-                    continue
-                vec = self.embedder.embed(fact.text)
-                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-                vector_facts.append(VectorFact(fact=fact, source_id=source_id, vector=vec_list))
+            from newsroom.llmutil import llm_context
+
+            with llm_context(event_id=event_id, source_id=source_id, stage="factbase"):
+                facts = self.extractor.extract(name, None, "\n".join(texts))[: self.max_facts_per_source]
+                for fact in facts:
+                    if fact.kind == "reaction":
+                        reactions.append((source_id, fact))
+                        continue
+                    vec = self.embedder.embed(fact.text)
+                    vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+                    vector_facts.append(VectorFact(fact=fact, source_id=source_id, vector=vec_list))
 
         merged = merge_facts(vector_facts, threshold=self.threshold)
         base = fact_base_json(merged, reactions)
@@ -89,8 +110,36 @@ class FactBaseBuilder:
                               reactions=len(reactions))
 
 
+def _merged_from_compact(rows: list[dict], source_id: int) -> list[MergedFact]:
+    out: list[MergedFact] = []
+    for row in rows[:6]:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        modality = str(row.get("modality") or "fact").strip().lower()
+        if modality not in {"fact", "statement", "forecast"}:
+            modality = "fact"
+        values: list[float] = []
+        number = row.get("number")
+        if number is not None and not isinstance(number, bool):
+            try:
+                values = [float(number)]
+            except (TypeError, ValueError):
+                pass
+        out.append(MergedFact(
+            text=text, source_ids=[source_id], confirmed_by=1, values=values,
+            divergent=False, variants=[text], modality=modality,
+            attribution=(str(row.get("attribution")).strip() if row.get("attribution") else None),
+            time_frame=(str(row.get("time_frame")).strip() if row.get("time_frame") else None),
+        ))
+    return out
+
+
 def build_pending(session_factory, builder: "FactBaseBuilder", *, limit: int = 25,
                   require_dedup_settled: bool = False,
+                  require_curation: bool = False,
                   dedup_grace_seconds: float = 300.0) -> dict[str, int]:
     """One fact-base tick: build the shared base for publishable events that have none
     yet. Once built, the event has a fact_base and is skipped next tick. With
@@ -107,6 +156,10 @@ def build_pending(session_factory, builder: "FactBaseBuilder", *, limit: int = 2
     # a duplicate event (ingest/publish dedup) is never posted — don't spend a fact base on it
     conditions = [Event.status.in_(FACTBASE_STATUSES), Event.fact_base.is_(None),
                   Event.duplicate_of.is_(None)]
+    if require_curation:
+        # Full per-source extraction/embedding is paid only for the shortlist. Digest
+        # events also qualify because their facts are consumed by the combined post.
+        conditions.append(Event.curated.in_(("publish", "digest")))
     dedup_clause = dedup_settled_clause(require_dedup_settled,
                                         now - dt.timedelta(seconds=dedup_grace_seconds))
     if dedup_clause is not None:

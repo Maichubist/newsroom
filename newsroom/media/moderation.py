@@ -175,7 +175,10 @@ def moderate_event_media(session_factory, moderator: ImageModerator, event_id: i
         if source is None:
             continue                         # cannot fetch this image -> do not clear it
         checked += 1
-        verdict = moderator.check(source)
+        from newsroom.llmutil import llm_context
+
+        with llm_context(event_id=event_id, media_id=media_id, stage="moderate_image"):
+            verdict = moderator.check(source)
         if verdict.blocked:
             flags.append({"media_id": media_id, "labels": verdict.labels, "reason": verdict.reason})
 
@@ -196,10 +199,10 @@ def moderate_event_media(session_factory, moderator: ImageModerator, event_id: i
 
 def moderate_pending(session_factory, moderator: ImageModerator, *, store=None,
                      limit: int = 25) -> dict[str, int]:
-    """One moderation tick: moderate publishable events that own images and have
-    no vision verdict yet. Considers both URL images and stored Telegram images."""
+    """Moderate approved events after all downloads have settled."""
     from sqlalchemy import Integer, and_, cast, or_, select
 
+    from newsroom.media.state import approved_event_ids_query, event_media_readiness
     from newsroom.models import Decision, Event, EventItem, Item, MediaAsset
 
     with session_factory() as s:
@@ -214,12 +217,15 @@ def moderate_pending(session_factory, moderator: ImageModerator, *, store=None,
             .join(Item, Item.id == EventItem.item_id)
             .join(MediaAsset, MediaAsset.item_id == Item.id)
             .where(Event.status.in_(("reported", "confirmed", "rumor")),
+                   Event.id.in_(approved_event_ids_query()),
                    MediaAsset.kind == "image",
-                   or_(MediaAsset.url.is_not(None),
-                       and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None))),
+                   and_(MediaAsset.storage_key.is_not(None), MediaAsset.purged_at.is_(None)),
                    Event.id.not_in(checked))
-            .order_by(Event.id).distinct().limit(limit)
+            .order_by(Event.id).distinct().limit(max(limit * 4, limit))
         ).scalars().all())
+
+        ids = [event_id for event_id in ids
+               if event_media_readiness(s, event_id).downloads_settled][:limit]
 
     stats = {"events": 0, "blocked": 0}
     for event_id in ids:

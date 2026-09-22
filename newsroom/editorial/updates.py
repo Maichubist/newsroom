@@ -133,6 +133,20 @@ def _render_fact_base(fact_base: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _initial_story_summary(event_title: str | None, fact_base: dict | None) -> str:
+    """Deterministic seed for a story's first event; no comparison means no LLM job."""
+    facts: list[str] = []
+    if isinstance(fact_base, dict):
+        for fact in fact_base.get("facts", []) or []:
+            if isinstance(fact, dict) and fact.get("text"):
+                facts.append(str(fact["text"]).strip())
+            if len(facts) >= 3:
+                break
+    if facts:
+        return "; ".join(f.rstrip(". ") for f in facts if f) + "."
+    return (event_title or "Нова подія").strip()
+
+
 class LLMUpdateClassifier:  # pragma: no cover - network
     def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini",
                  prompt: str = DEFAULT_UPDATE_PROMPT):
@@ -203,11 +217,30 @@ class StoryUpdater:
                 return UpdateResult(event_id, skipped=True)
             story = s.get(Story, event.story_id)
             current_summary = story.current_summary if story else None
+            story_id = event.story_id
+            story_event_count = int(s.scalar(
+                select(func.count()).select_from(Event).where(Event.story_id == story_id)
+            ) or 0)
             event_title = event.title
-            fact_base = event.fact_base
+            fact_base = event.fact_base or ({"facts": list(event.compact_facts or [])}
+                                             if event.compact_facts else None)
 
-        # 2. classify (LLM, outside the session)
-        decision = self.classifier.classify(current_summary, event_title, fact_base)
+        # 2. A story's first event has nothing to compare against. It is necessarily
+        #    the initial new_fact, so seed the summary deterministically and save an LLM call.
+        if story_event_count <= 1 and not current_summary:
+            decision = UpdateDecision(
+                update_type=UPDATE_NEW_FACT,
+                significant=True,
+                summary=_initial_story_summary(event_title, fact_base),
+                position_changed=False,
+            )
+            decision_model = "deterministic:first_story_event"
+        else:
+            from newsroom.llmutil import llm_context
+
+            with llm_context(event_id=event_id, story_id=story_id, stage="story_update"):
+                decision = self.classifier.classify(current_summary, event_title, fact_base)
+            decision_model = getattr(self.classifier, "model", None)
         route = route_update(decision.update_type, decision.significant)
 
         # 3. persist: event.update_type, story summary + this event's version, journal
@@ -235,7 +268,7 @@ class StoryUpdater:
                 details={"route": route, "significant": decision.significant,
                          "position_changed": decision.position_changed},
                 charter_version=self.charter_version, prompt_version=self.prompt_version,
-                model=getattr(self.classifier, "model", None),
+                model=decision_model,
             ))
             s.commit()
 

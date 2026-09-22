@@ -94,7 +94,13 @@ class OpenAIEmbedder:  # pragma: no cover - network
     def embed(self, text: str) -> np.ndarray:
         import time
 
-        from newsroom.llmutil import MAX_LOG_TEXT, UsageRecord, cost_for, record_usage
+        from newsroom.llmutil import (
+            MAX_LOG_TEXT,
+            UsageRecord,
+            cost_for,
+            current_llm_context,
+            record_usage,
+        )
 
         inp = clip_for_embedding(text)
         t0 = time.monotonic()
@@ -102,8 +108,13 @@ class OpenAIEmbedder:  # pragma: no cover - network
         duration_ms = int((time.monotonic() - t0) * 1000)
         usage = getattr(resp, "usage", None)
         ptok = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
+        context = current_llm_context()
+        event_id = context.pop("event_id", None)
+        related_event_id = context.pop("related_event_id", None)
         record_usage(UsageRecord(op="embed", model=self.model, prompt_tokens=ptok,
                                  cost_usd=cost_for(self.model, ptok, 0, 0), duration_ms=duration_ms,
+                                 event_id=event_id, related_event_id=related_event_id,
+                                 context=context or None,
                                  request_text=inp[:MAX_LOG_TEXT]))
         vec = np.asarray(resp.data[0].embedding, dtype=np.float32)
         if vec.shape[0] != EMBEDDING_DIM:
